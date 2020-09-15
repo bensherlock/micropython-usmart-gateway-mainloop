@@ -32,12 +32,25 @@
 #
 """MicroPython MainLoop for USMART Gateway Application."""
 
+from pybd_expansion.main.powermodule import *
+from sensor_payload.main.sensor_payload import *
+
+
 # Standard Interface for MainLoop
 # - def run_mainloop() : never returns
 def run_mainloop():
     """Standard Interface for MainLoop. Never returns."""
     while True:
-        continue
+        # Connect to server over wifi
+        # Put to server: current configuration information - module versions etc.
+        # Get from sensor payload: data as json
+        sensor = get_sensor_payload_instance()
+        # Put to server: sensor payload data
+        # Get from logger: logs as json
+        # Put to server: logs
+        # Get from server: UAC Network Configuration as json
+        # Save to disk: UAC Network Configuration as json
+
 
 
 
