@@ -132,12 +132,15 @@ def run_mainloop():
             sensor.process_acquisition()
 
         sensor_data_json = sensor.get_latest_data_as_json()
-        sensor_data_str = json.dumps(sensor_data_json)
+        #sensor_data_str = json.dumps(sensor_data_json)
         #print(sensor_data_str)
 
         if wifi_connected:
-            pass
-        # Put to server: sensor payload data
+            # Put to server: sensor payload data
+            import mainloop.main.httputil as httputil
+            http_client = httputil.HttpClient()
+            http_client.post('192.168.4.1', json=sensor_data_json)
+
         # Get from logger: logs as json
         # Put to server: logs
         # Get from server: UAC Network Configuration as json
