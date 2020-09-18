@@ -5,6 +5,7 @@
 #
 # Derived from the HttpClient in OTA Updater and urequests in micropython-lib.
 
+import usocket
 
 class Response:
     """HTTP Response."""
@@ -12,6 +13,13 @@ class Response:
     def __init__(self, f):
         self.raw = f
         self.encoding = 'utf-8'
+        self._cached = None
+
+    def __del__(self):
+        # Ensure the socket is closed.
+        if self.raw:
+            self.raw.close()
+            self.raw = None
         self._cached = None
 
     def close(self):

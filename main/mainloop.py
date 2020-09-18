@@ -34,6 +34,7 @@
 
 import json
 import pyb
+import machine
 
 from pybd_expansion.main.powermodule import *
 from sensor_payload.main.sensor_payload import *
@@ -62,6 +63,7 @@ def connect_to_wifi(ssid, password):
     if not sta_if.isconnected():
         print('connecting to network...')
         sta_if.active(True)
+        #sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
         sta_if.connect(ssid, password)
         while not sta_if.isconnected():
             # Check the status
@@ -99,60 +101,92 @@ def disconnect_from_wifi():
     # Deactivate the WLAN
     sta_if.active(False)
 
-
+_rtc_callback_flag = False
 def rtc_callback(unknown):
+    global _rtc_callback_flag
     # RTC Callback function - Toggle LED
     pyb.LED(2).toggle()
+    _rtc_callback_flag = True
 
 
 # Standard Interface for MainLoop
 # - def run_mainloop() : never returns
 def run_mainloop():
     """Standard Interface for MainLoop. Never returns."""
+    global _rtc_callback_flag
 
     # Set RTC to wakeup at a set interval
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
     # A default wakeup to start with. To be overridden by network manager/sleep manager
-    rtc.wakeup(10 * 1000, rtc_callback)  # milliseconds
+    rtc.wakeup(30 * 1000, rtc_callback)  # milliseconds
 
     while True:
-        # Connect to server over wifi
-        wifi_cfg = load_wifi_config()
-        wifi_connected = False
-        if wifi_cfg:
-            wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'], wifi_cfg['wifi']['password'])
+        try:
 
-        # Put to server: current configuration information - module versions etc.
+            wifi_connected = is_wifi_connected()
 
-        # Get from sensor payload: data as json
-        sensor = get_sensor_payload_instance()
-        sensor.start_acquisition()
-        while not sensor.is_completed():
-            sensor.process_acquisition()
+            if not wifi_connected:
+                # Connect to server over wifi
+                wifi_cfg = load_wifi_config()
+                if wifi_cfg:
+                    wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'], wifi_cfg['wifi']['password'])
 
-        sensor_data_json = sensor.get_latest_data_as_json()
-        #sensor_data_str = json.dumps(sensor_data_json)
-        #print(sensor_data_str)
+            # Put to server: current configuration information - module versions etc.
 
-        if wifi_connected:
-            # Put to server: sensor payload data
-            import mainloop.main.httputil as httputil
-            http_client = httputil.HttpClient()
-            http_client.post('192.168.4.1', json=sensor_data_json)
+            # Get from sensor payload: data as json
+            sensor = get_sensor_payload_instance()
+            sensor.start_acquisition()
+            while not sensor.is_completed():
+                sensor.process_acquisition()
 
-        # Get from logger: logs as json
-        # Put to server: logs
-        # Get from server: UAC Network Configuration as json
-        # Save to disk: UAC Network Configuration as json
+            sensor_data_json = sensor.get_latest_data_as_json()
+            #sensor_data_str = json.dumps(sensor_data_json)
+            #print(sensor_data_str)
 
-        # Sleep
-        # a. Light Sleep
-        pyb.stop()
-        # b. Deep Sleep - followed by hard reset
-        # pyb.standby()
+            if wifi_connected:
+                # Put to server: sensor payload data
+                import mainloop.main.httputil as httputil
+                http_client = httputil.HttpClient()
+                import gc
+                gc.collect()
+                response = http_client.post('http://192.168.4.1:3000/sensors/', json=sensor_data_json)
+                # Check for success - resend/queue and resend
+                response = None
+                gc.collect()
 
-        # Wake up
+            # Get from logger: logs as json
+            # Put to server: logs
+            # Get from server: UAC Network Configuration as json
+            # Save to disk: UAC Network Configuration as json
 
+            # Disconnect from wifi
+            disconnect_from_wifi()
 
+            # Wait for WLAN to switch off before going to sleep. Otherwise WLAN event will wake us up early.
+
+            # Sleep
+            # a. Light Sleep
+            #pyb.stop()
+            machine.lightsleep()
+            # b. Deep Sleep - followed by hard reset
+            # pyb.standby()
+            # machine.deepsleep()
+            # c. poll flag without sleeping
+            #while not _rtc_callback_flag:
+            #    continue
+            #_rtc_callback_flag = False
+
+            # Wake up
+            # Check for wakeup reason
+            # https://docs.micropython.org/en/latest/library/machine.html
+            wake_reason = machine.wake_reason()
+            while not (wake_reason == machine.RTC_WAKE or wake_reason == machine.PIN_WAKE):
+                # Back to sleep
+                machine.lightsleep()
+                wake_reason = machine.wake_reason()
+
+        except Exception:
+            pass
+            # Log to file
 
