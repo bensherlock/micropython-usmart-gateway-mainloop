@@ -39,6 +39,8 @@ import machine
 from pybd_expansion.main.powermodule import *
 from sensor_payload.main.sensor_payload import *
 
+import jotter
+
 
 # WiFi
 def load_wifi_config():
@@ -134,7 +136,9 @@ def run_mainloop():
 
             # Put to server: current configuration information - module versions etc.
 
+            # If is time to take a sensor reading (eg hourly)
             # Get from sensor payload: data as json
+            jotter.get_jotter().jot("Acquiring sensor data.", source_file=__name__)
             sensor = get_sensor_payload_instance()
             sensor.start_acquisition()
             while not sensor.is_completed():
@@ -146,6 +150,7 @@ def run_mainloop():
 
             if wifi_connected:
                 # Put to server: sensor payload data
+                jotter.get_jotter().jot("Sending data to server.", source_file=__name__)
                 import mainloop.main.httputil as httputil
                 http_client = httputil.HttpClient()
                 import gc
@@ -160,6 +165,11 @@ def run_mainloop():
             # Get from server: UAC Network Configuration as json
             # Save to disk: UAC Network Configuration as json
 
+            # Get NTP Network time from shore and set the RTC.
+
+
+            # Relay all incoming NM3 packets via wifi.
+
             # Disconnect from wifi
             disconnect_from_wifi()
 
@@ -168,6 +178,8 @@ def run_mainloop():
             # Sleep
             # a. Light Sleep
             #pyb.stop()
+            jotter.get_jotter().jot("Going to lightsleep.", source_file=__name__)
+            _rtc_callback_flag = False  # Clear the callback flags
             machine.lightsleep()
             # b. Deep Sleep - followed by hard reset
             # pyb.standby()
@@ -178,15 +190,14 @@ def run_mainloop():
             #_rtc_callback_flag = False
 
             # Wake up
-            # Check for wakeup reason
+            # RTC or incoming NM3 packet? Only way to know is by flags set in the callbacks.
+            # machine.wake_reason() is not implemented on PYBD!
             # https://docs.micropython.org/en/latest/library/machine.html
-            wake_reason = machine.wake_reason()
-            while not (wake_reason == machine.RTC_WAKE or wake_reason == machine.PIN_WAKE):
-                # Back to sleep
-                machine.lightsleep()
-                wake_reason = machine.wake_reason()
+            jotter.get_jotter().jot("Wake up. _rtc_callback_flag=" + str(_rtc_callback_flag), source_file=__name__)
 
-        except Exception:
+
+        except Exception as the_exception:
+            jotter.get_jotter().jot_exception(the_exception)
             pass
             # Log to file
 
