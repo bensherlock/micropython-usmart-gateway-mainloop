@@ -41,6 +41,8 @@ from pybd_expansion.main.max3221e import MAX3221E
 from pybd_expansion.main.powermodule import PowerModule
 import sensor_payload.main.sensor_payload as sensor_payload
 
+from uac_modem.main.unm3driver import MessagePacket, Nm3
+
 
 import jotter
 
@@ -114,18 +116,18 @@ def rtc_callback(unknown):
     _rtc_callback_flag = True
 
 _nm3_callback_flag = False
-_nm3_callback_datetime = None
+_nm3_callback_timestamp = None
 _nm3_callback_millis = None
 _nm3_callback_micros = None
 def nm3_callback(line):
     global _nm3_callback_flag
-    global _nm3_callback_datetime
+    global _nm3_callback_timestamp
     global _nm3_callback_millis
     global _nm3_callback_micros
     # NM3 Callback function
     _nm3_callback_micros = pyb.micros()
     _nm3_callback_millis = pyb.millis()
-    _nm3_callback_datetime = utime.localtime()
+    _nm3_callback_timestamp = utime.localtime()
     _nm3_callback_flag = True
 
 
@@ -170,6 +172,8 @@ def run_mainloop():
     global _rtc_callback_flag
     global _nm3_callback_flag
     global _nm3_callback_timestamp
+    global _nm3_callback_millis
+    global _nm3_callback_micros
 
     # Set RTC to wakeup at a set interval
     rtc = pyb.RTC()
@@ -189,6 +193,9 @@ def run_mainloop():
 
     # Set callback for nm3 pin change - line goes high on frame synchronisation
     nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_FALLING, pyb.Pin.PULL_DOWN, nm3_callback)
+
+    uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=1000)
+    nm3_modem = Nm3(uart)
 
 
     while True:
@@ -219,6 +226,38 @@ def run_mainloop():
             # _nm3_callback_datetime
             # _nm3_callback_millis - loops after 12.4 days. pauses during sleep modes.
             # _nm3_callback_micros - loops after 17.8 minutes. pauses during sleep modes.
+            if _nm3_callback_flag:
+                _nm3_callback_flag = False  # Clear flag
+                # Packet incoming - although it may not be for us - try process for 2 seconds
+                start_millis =  pyb.millis()
+
+                while pyb.elapsed_millis(start_millis) < 2000:
+
+                    nm3_modem.poll_receiver()
+                    nm3_modem.process_incoming_buffer()
+
+                    if nm3_modem.has_received_packet():
+                        message_packet = nm3_modem.get_received_packet()
+                        # Copy the HW triggered timestamps over
+                        message_packet.timestamp = _nm3_callback_timestamp
+                        message_packet.timestamp_millis = _nm3_callback_millis
+                        message_packet.timestamp_micros = _nm3_callback_micros
+
+                        # Send packet onwards
+                        message_packet_json = message_packet.json()
+
+                        wifi_connected = is_wifi_connected()
+                        if wifi_connected:
+                            # Put to server: sensor payload data
+                            jotter.get_jotter().jot("Sending nm3 message packet to server.", source_file=__name__)
+                            import mainloop.main.httputil as httputil
+                            http_client = httputil.HttpClient()
+                            import gc
+                            gc.collect()
+                            response = http_client.post('http://192.168.4.1:3000/messages/', json=message_packet_json)
+                            # Check for success - resend/queue and resend - TODO
+                            response = None
+                            gc.collect()
 
 
 
@@ -227,7 +266,9 @@ def run_mainloop():
             #
             # _rtc_callback_flag
             # If is time to take a sensor reading (eg hourly)
-            do_local_sensor_reading()
+            if _rtc_callback_flag:
+                _rtc_callback_flag = False  # Clear the flag
+                do_local_sensor_reading()
 
 
             #
