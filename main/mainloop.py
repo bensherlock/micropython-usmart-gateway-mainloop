@@ -46,6 +46,10 @@ from uac_modem.main.unm3driver import MessagePacket, Nm3
 
 import jotter
 
+import micropython
+micropython.alloc_emergency_exception_buf(100)
+# https://docs.micropython.org/en/latest/reference/isr_rules.html#the-emergency-exception-buffer
+
 
 # WiFi
 def load_wifi_config():
@@ -110,16 +114,18 @@ def disconnect_from_wifi():
 
 _rtc_callback_flag = False
 def rtc_callback(unknown):
+    # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _rtc_callback_flag
     # RTC Callback function - Toggle LED
     pyb.LED(2).toggle()
     _rtc_callback_flag = True
 
 _nm3_callback_flag = False
-_nm3_callback_timestamp = None
+_nm3_callback_seconds = None
 _nm3_callback_millis = None
 _nm3_callback_micros = None
 def nm3_callback(line):
+    # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _nm3_callback_flag
     global _nm3_callback_timestamp
     global _nm3_callback_millis
@@ -127,7 +133,7 @@ def nm3_callback(line):
     # NM3 Callback function
     _nm3_callback_micros = pyb.micros()
     _nm3_callback_millis = pyb.millis()
-    _nm3_callback_timestamp = utime.localtime()
+    _nm3_callback_seconds = utime.time()
     _nm3_callback_flag = True
 
 
@@ -171,7 +177,7 @@ def run_mainloop():
     """Standard Interface for MainLoop. Never returns."""
     global _rtc_callback_flag
     global _nm3_callback_flag
-    global _nm3_callback_timestamp
+    global _nm3_callback_seconds
     global _nm3_callback_millis
     global _nm3_callback_micros
 
@@ -189,9 +195,11 @@ def run_mainloop():
     pyb.Pin.board.EN_3V3.on()
     pyb.Pin('Y5', pyb.Pin.OUT, value=0)  # enable Y5 Pin as output
     max3221e = MAX3221E(pyb.Pin.board.Y5)
-    max3221e.tx_force_on() # Enable Tx Driver
+    max3221e.tx_force_off() # Disable Tx Driver
 
     # Set callback for nm3 pin change - line goes high on frame synchronisation
+    # make sure it is clear first
+    nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_FALLING, pyb.Pin.PULL_DOWN, None)
     nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_FALLING, pyb.Pin.PULL_DOWN, nm3_callback)
 
     uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=1000)
@@ -206,6 +214,9 @@ def run_mainloop():
             # 1. Incoming NM3 MessagePackets (HW Wakeup)
             # 2. Periodic Sensor Readings (RTC)
 
+			# Enable power supply to 232 driver
+			pyb.Pin.board.EN_3V3.on()
+			
             #
             # Connect to wifi
             #
@@ -239,7 +250,7 @@ def run_mainloop():
                     if nm3_modem.has_received_packet():
                         message_packet = nm3_modem.get_received_packet()
                         # Copy the HW triggered timestamps over
-                        message_packet.timestamp = _nm3_callback_timestamp
+                        message_packet.timestamp = utime.localtime(_nm3_callback_seconds)
                         message_packet.timestamp_millis = _nm3_callback_millis
                         message_packet.timestamp_micros = _nm3_callback_micros
 
