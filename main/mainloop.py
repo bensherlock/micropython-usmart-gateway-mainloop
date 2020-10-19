@@ -120,14 +120,16 @@ def rtc_callback(unknown):
     pyb.LED(2).toggle()
     _rtc_callback_flag = True
 
+
+
 _nm3_callback_flag = False
-_nm3_callback_seconds = None
-_nm3_callback_millis = None
-_nm3_callback_micros = None
+_nm3_callback_seconds = None # used with utime.localtime(_nm3_callback_seconds) to make a timestamp
+_nm3_callback_millis = None # loops after 12.4 days. pauses during sleep modes.
+_nm3_callback_micros = None # loops after 17.8 minutes. pauses during sleep modes.
 def nm3_callback(line):
     # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _nm3_callback_flag
-    global _nm3_callback_timestamp
+    global _nm3_callback_seconds
     global _nm3_callback_millis
     global _nm3_callback_micros
     # NM3 Callback function
@@ -199,138 +201,195 @@ def run_mainloop():
 
     # Set callback for nm3 pin change - line goes high on frame synchronisation
     # make sure it is clear first
-    nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_FALLING, pyb.Pin.PULL_DOWN, None)
-    nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_FALLING, pyb.Pin.PULL_DOWN, nm3_callback)
+    nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_RISING, pyb.Pin.PULL_DOWN, None)
+    nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_RISING, pyb.Pin.PULL_DOWN, nm3_callback)
 
-    uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=1000)
-    nm3_modem = Nm3(uart)
+    # Serial Port/UART is opened with a 100ms timeout for reading - non-blocking.
+    uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=100)
+    nm3_modem = Nm3(input_stream=uart, output_stream=uart)
 
+
+    operating_mode = 0 # Mark One
+
+    last_nm3_message_received_time = utime.time()
 
     while True:
         try:
 
-            # Start of the wake loop
-            # Wifi connection will be needed for:
-            # 1. Incoming NM3 MessagePackets (HW Wakeup)
-            # 2. Periodic Sensor Readings (RTC)
+            # Mark One
+            # - Continually poll for incoming NM3 messages
+            # - Then enable wifi and send to server
+            # - After a time of no NM3 messages disable the wifi
+            if operating_mode == 0:
 
-			# Enable power supply to 232 driver
-			pyb.Pin.board.EN_3V3.on()
-			
-            #
-            # Connect to wifi
-            #
-            wifi_connected = is_wifi_connected()
+                nm3_modem.poll_receiver()
+                nm3_modem.process_incoming_buffer()
 
-            if not wifi_connected:
-                # Connect to server over wifi
-                wifi_cfg = load_wifi_config()
-                if wifi_cfg:
-                    wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'], wifi_cfg['wifi']['password'])
+                wifi_connected = is_wifi_connected()
 
-            # Put to server: current configuration information - module versions etc.
+                if nm3_modem.has_received_packet() and not wifi_connected:
+                    # Connect to server over wifi
+                    wifi_cfg = load_wifi_config()
+                    if wifi_cfg:
+                        wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'],
+                                                         wifi_cfg['wifi']['password'])
 
-            #
-            # 1. Incoming NM3 MessagePackets (HW Wakeup)
-            #
-            # _nm3_callback_flag
-            # _nm3_callback_datetime
-            # _nm3_callback_millis - loops after 12.4 days. pauses during sleep modes.
-            # _nm3_callback_micros - loops after 17.8 minutes. pauses during sleep modes.
-            if _nm3_callback_flag:
-                _nm3_callback_flag = False  # Clear flag
-                # Packet incoming - although it may not be for us - try process for 2 seconds
-                start_millis =  pyb.millis()
 
-                while pyb.elapsed_millis(start_millis) < 2000:
+                while nm3_modem.has_received_packet():
+                    last_nm3_message_received_time = utime.time()
 
-                    nm3_modem.poll_receiver()
-                    nm3_modem.process_incoming_buffer()
+                    message_packet = nm3_modem.get_received_packet()
+                    # Copy the HW triggered timestamps over
+                    message_packet.timestamp = utime.localtime(_nm3_callback_seconds)
+                    message_packet.timestamp_millis = _nm3_callback_millis
+                    message_packet.timestamp_micros = _nm3_callback_micros
 
-                    if nm3_modem.has_received_packet():
-                        message_packet = nm3_modem.get_received_packet()
-                        # Copy the HW triggered timestamps over
-                        message_packet.timestamp = utime.localtime(_nm3_callback_seconds)
-                        message_packet.timestamp_millis = _nm3_callback_millis
-                        message_packet.timestamp_micros = _nm3_callback_micros
+                    # Send packet onwards
+                    message_packet_json = message_packet.json()
 
-                        # Send packet onwards
-                        message_packet_json = message_packet.json()
+                    wifi_connected = is_wifi_connected()
+                    if wifi_connected:
+                        # Put to server: sensor payload data
+                        # jotter.get_jotter().jot("Sending nm3 message packet to server.", source_file=__name__)
+                        import mainloop.main.httputil as httputil
+                        http_client = httputil.HttpClient()
+                        import gc
+                        gc.collect()
+                        response = http_client.post('http://192.168.4.1:3000/messages/',
+                                                    json=message_packet_json)
+                        # Check for success - resend/queue and resend - TODO
+                        response = None
+                        gc.collect()
 
-                        wifi_connected = is_wifi_connected()
-                        if wifi_connected:
-                            # Put to server: sensor payload data
-                            jotter.get_jotter().jot("Sending nm3 message packet to server.", source_file=__name__)
-                            import mainloop.main.httputil as httputil
-                            http_client = httputil.HttpClient()
-                            import gc
-                            gc.collect()
-                            response = http_client.post('http://192.168.4.1:3000/messages/', json=message_packet_json)
-                            # Check for success - resend/queue and resend - TODO
-                            response = None
-                            gc.collect()
+                if utime.time() > last_nm3_message_received_time + 30:
+                    # Disable the wifi
+                    disconnect_from_wifi()
 
 
 
-            #
-            # 2. Periodic Sensor Readings (RTC)
-            #
-            # _rtc_callback_flag
-            # If is time to take a sensor reading (eg hourly)
-            if _rtc_callback_flag:
-                _rtc_callback_flag = False  # Clear the flag
-                do_local_sensor_reading()
+            # Mark Two
+            # - Use the HW interrupt of NM3 Flag to wake-up
+            # - poll for incoming NM3 messages
+            # - Then enable wifi and send to server
+            # - After a time of no NM3 messages disable the wifi and go to sleep
+            elif operating_mode == 1:
+                pass
+
+            # Mark Three
+            # - Network Manager TDA-MAC and RTC to control wakeup and sleep timing.
+            elif operating_mode == 2:
 
 
-            #
-            # 3. Get NTP Network time from shore and set the RTC.
-            #
+                # Enable power supply to 232 driver
+                pyb.Pin.board.EN_3V3.on()
 
-            #
-            # 4. Download configuration updates from server
-            #
-            # Get from server: UAC Network Configuration as json
-            # Save to disk: UAC Network Configuration as json
+                #
+                # Connect to wifi
+                #
+                wifi_connected = is_wifi_connected()
+
+                if not wifi_connected:
+                    # Connect to server over wifi
+                    wifi_cfg = load_wifi_config()
+                    if wifi_cfg:
+                        wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'], wifi_cfg['wifi']['password'])
+
+                # Put to server: current configuration information - module versions etc.
+
+                #
+                # 1. Incoming NM3 MessagePackets (HW Wakeup)
+                #
+                # _nm3_callback_flag
+                # _nm3_callback_datetime
+                # _nm3_callback_millis - loops after 12.4 days. pauses during sleep modes.
+                # _nm3_callback_micros - loops after 17.8 minutes. pauses during sleep modes.
+                if _nm3_callback_flag:
+                    _nm3_callback_flag = False  # Clear flag
+                    # Packet incoming - although it may not be for us - try process for 2 seconds
+                    start_millis =  pyb.millis()
+
+                    while pyb.elapsed_millis(start_millis) < 2000:
+
+                        nm3_modem.poll_receiver()
+                        nm3_modem.process_incoming_buffer()
+
+                        while nm3_modem.has_received_packet():
+                            message_packet = nm3_modem.get_received_packet()
+                            # Copy the HW triggered timestamps over
+                            message_packet.timestamp = utime.localtime(_nm3_callback_seconds)
+                            message_packet.timestamp_millis = _nm3_callback_millis
+                            message_packet.timestamp_micros = _nm3_callback_micros
+
+                            # Send packet onwards
+                            message_packet_json = message_packet.json()
+
+                            wifi_connected = is_wifi_connected()
+                            if wifi_connected:
+                                # Put to server: sensor payload data
+                                #jotter.get_jotter().jot("Sending nm3 message packet to server.", source_file=__name__)
+                                import mainloop.main.httputil as httputil
+                                http_client = httputil.HttpClient()
+                                import gc
+                                gc.collect()
+                                response = http_client.post('http://192.168.4.1:3000/messages/', json=message_packet_json)
+                                # Check for success - resend/queue and resend - TODO
+                                response = None
+                                gc.collect()
 
 
 
+                #
+                # 2. Periodic Activity (RTC)
+                #
+                # _rtc_callback_flag
 
-            #
-            # Prepare to sleep
-            #
+                #
+                # 3. Get NTP Network time from shore and set the RTC.
+                #
 
-            # Disconnect from wifi
-            disconnect_from_wifi()
+                #
+                # 4. Download configuration updates from server
+                #
+                # Get from server: UAC Network Configuration as json
+                # Save to disk: UAC Network Configuration as json
 
-            # Power down 3V3 regulator
-            pyb.Pin.board.EN_3V3.off()
+                #
+                # Prepare to sleep
+                #
 
-            # WLAN event may wake us up early.
+                # Disconnect from wifi
+                disconnect_from_wifi()
 
-            # Sleep
-            # a. Light Sleep
-            #pyb.stop()
-            jotter.get_jotter().jot("Going to lightsleep.", source_file=__name__)
-            _rtc_callback_flag = False  # Clear the callback flags
-            machine.lightsleep()
-            # b. Deep Sleep - followed by hard reset
-            # pyb.standby()
-            # machine.deepsleep()
-            # c. poll flag without sleeping
-            #while not _rtc_callback_flag:
-            #    continue
-            #_rtc_callback_flag = False
+                # Power down 3V3 regulator
+                pyb.Pin.board.EN_3V3.off()
 
-            #
-            # Wake up
-            #
+                # WLAN event may wake us up early.
 
-            # RTC or incoming NM3 packet? Only way to know is by flags set in the callbacks.
-            # machine.wake_reason() is not implemented on PYBD!
-            # https://docs.micropython.org/en/latest/library/machine.html
-            jotter.get_jotter().jot("Wake up. _rtc_callback_flag=" + str(_rtc_callback_flag), source_file=__name__)
+                # Sleep
+                # a. Light Sleep
+                #pyb.stop()
+                #jotter.get_jotter().jot("Going to lightsleep.", source_file=__name__)
+                _rtc_callback_flag = False  # Clear the callback flags
+                machine.lightsleep()
 
+                # b. Deep Sleep - followed by hard reset
+                # pyb.standby()
+                # machine.deepsleep()
+                # c. poll flag without sleeping
+                # while not _rtc_callback_flag:
+                #    continue
+                # _rtc_callback_flag = False
+                # d. wait for interrupt (wfi)
+                # machine.wfi()
 
+                #
+                # Wake up
+                #
+
+                # RTC or incoming NM3 packet? Only way to know is by flags set in the callbacks.
+                # machine.wake_reason() is not implemented on PYBD!
+                # https://docs.micropython.org/en/latest/library/machine.html
+                # jotter.get_jotter().jot("Wake up. _rtc_callback_flag=" + str(_rtc_callback_flag), source_file=__name__)
 
         except Exception as the_exception:
             jotter.get_jotter().jot_exception(the_exception)
