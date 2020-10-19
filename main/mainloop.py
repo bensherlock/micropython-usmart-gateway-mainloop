@@ -228,6 +228,7 @@ def run_mainloop():
                 wifi_connected = is_wifi_connected()
 
                 if nm3_modem.has_received_packet() and not wifi_connected:
+                    print("Has received nm3 message. Connecting to wifi")
                     # Connect to server over wifi
                     wifi_cfg = load_wifi_config()
                     if wifi_cfg:
@@ -236,6 +237,7 @@ def run_mainloop():
 
 
                 while nm3_modem.has_received_packet():
+                    print("Has received nm3 message.")
                     last_nm3_message_received_time = utime.time()
 
                     message_packet = nm3_modem.get_received_packet()
@@ -251,6 +253,7 @@ def run_mainloop():
                     if wifi_connected:
                         # Put to server: sensor payload data
                         # jotter.get_jotter().jot("Sending nm3 message packet to server.", source_file=__name__)
+                        print("Sending nm3 message to server")
                         import mainloop.main.httputil as httputil
                         http_client = httputil.HttpClient()
                         import gc
