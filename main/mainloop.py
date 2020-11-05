@@ -35,6 +35,7 @@
 import json
 import pyb
 import machine
+from ucollections import deque
 import utime
 
 from pybd_expansion.main.max3221e import MAX3221E
@@ -95,6 +96,51 @@ def connect_to_wifi(ssid, password):
     return True
 
 
+# wifi_cfg['wifi']['ssid'], wifi_cfg['wifi']['password']
+def start_connect_to_wifi(ssid, password):
+    """Connect to the wifi. Return True if started ok."""
+    """Starts connecting to the wifi with the given ssid and password. Returns before completion."""
+    import network
+    sta_if = network.WLAN(network.STA_IF)
+    if not sta_if.isconnected():
+        print('connecting to network...')
+        sta_if.active(True)
+        #sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
+        sta_if.connect(ssid, password)
+
+        # Check the status
+        status = sta_if.status()
+        # Constants aren't implemented for PYBD as of MicroPython v1.13.
+        # From: https://github.com/micropython/micropython/issues/4682
+        # 'So "is-connecting" is defined as s.status() in (1, 2) and "is-connected" is defined as s.status() == 3.'
+        #
+        if status <= 0:
+            # Error States?
+            return False
+        # if ((status == network.WLAN.STAT_IDLE) or (status == network.WLAN.STAT_WRONG_PASSWORD)
+        #        or (status == network.WLAN.STAT_NO_AP_FOUND) or (status == network.WLAN.STAT_CONNECT_FAIL)):
+        # Problems so return
+        #    return False
+
+    return True
+
+
+def is_wifi_connecting():
+    """Is the wifi currently trying to connect."""
+    import network
+    sta_if = network.WLAN(network.STA_IF)
+    # Check the status
+    status = sta_if.status()
+    # Constants aren't implemented for PYBD as of MicroPython v1.13.
+    # From: https://github.com/micropython/micropython/issues/4682
+    # 'So "is-connecting" is defined as s.status() in (1, 2) and "is-connected" is defined as s.status() == 3.'
+    #
+    if status <= 0:
+        # Error States?
+        return False
+
+    return True
+
 def is_wifi_connected():
     """Is the WiFi connected."""
     import network
@@ -112,7 +158,10 @@ def disconnect_from_wifi():
     # Deactivate the WLAN
     sta_if.active(False)
 
+
 _rtc_callback_flag = False
+
+
 def rtc_callback(unknown):
     # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _rtc_callback_flag
@@ -121,11 +170,12 @@ def rtc_callback(unknown):
     _rtc_callback_flag = True
 
 
-
 _nm3_callback_flag = False
-_nm3_callback_seconds = None # used with utime.localtime(_nm3_callback_seconds) to make a timestamp
-_nm3_callback_millis = None # loops after 12.4 days. pauses during sleep modes.
-_nm3_callback_micros = None # loops after 17.8 minutes. pauses during sleep modes.
+_nm3_callback_seconds = 0  # used with utime.localtime(_nm3_callback_seconds) to make a timestamp
+_nm3_callback_millis = 0  # loops after 12.4 days. pauses during sleep modes.
+_nm3_callback_micros = 0  # loops after 17.8 minutes. pauses during sleep modes.
+
+
 def nm3_callback(line):
     # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _nm3_callback_flag
@@ -139,11 +189,10 @@ def nm3_callback(line):
     _nm3_callback_flag = True
 
 
-
 def do_local_sensor_reading():
     """Take readings from local sensors and send via wifi."""
     # Get from sensor payload: data as json
-    jotter.get_jotter().jot("Acquiring sensor data.", source_file=__name__)
+    #jotter.get_jotter().jot("Acquiring sensor data.", source_file=__name__)
     sensor = sensor_payload.get_sensor_payload_instance()
     sensor.start_acquisition()
     while not sensor.is_completed():
@@ -160,7 +209,7 @@ def do_local_sensor_reading():
     #
     if wifi_connected:
         # Put to server: sensor payload data
-        jotter.get_jotter().jot("Sending sensor data to server.", source_file=__name__)
+        #jotter.get_jotter().jot("Sending sensor data to server.", source_file=__name__)
         import mainloop.main.httputil as httputil
         http_client = httputil.HttpClient()
         import gc
@@ -169,8 +218,6 @@ def do_local_sensor_reading():
         # Check for success - resend/queue and resend - TODO
         response = None
         gc.collect()
-
-
 
 
 # Standard Interface for MainLoop
@@ -187,7 +234,7 @@ def run_mainloop():
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
     # A default wakeup to start with. To be overridden by network manager/sleep manager
-    rtc.wakeup(30 * 1000, rtc_callback)  # milliseconds
+    rtc.wakeup(1 * 60 * 1000, rtc_callback)  # milliseconds
 
     # Enable the NM3 power supply on the powermodule
     powermodule = PowerModule()
@@ -197,7 +244,7 @@ def run_mainloop():
     pyb.Pin.board.EN_3V3.on()
     pyb.Pin('Y5', pyb.Pin.OUT, value=0)  # enable Y5 Pin as output
     max3221e = MAX3221E(pyb.Pin.board.Y5)
-    max3221e.tx_force_off() # Disable Tx Driver
+    max3221e.tx_force_off()  # Disable Tx Driver
 
     # Set callback for nm3 pin change - line goes high on frame synchronisation
     # make sure it is clear first
@@ -208,10 +255,13 @@ def run_mainloop():
     uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=100)
     nm3_modem = Nm3(input_stream=uart, output_stream=uart)
 
-
-    operating_mode = 0 # Mark One
+    operating_mode = 1  # Mark Two
 
     last_nm3_message_received_time = utime.time()
+
+    # Micropython needs a defined size of deque
+    json_to_send_messages = deque((), 10)
+    json_to_send_statuses = deque((), 10)
 
     while True:
         try:
@@ -234,7 +284,6 @@ def run_mainloop():
                     if wifi_cfg:
                         wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'],
                                                          wifi_cfg['wifi']['password'])
-
 
                 while nm3_modem.has_received_packet():
                     print("Has received nm3 message.")
@@ -268,20 +317,113 @@ def run_mainloop():
                     # Disable the wifi
                     disconnect_from_wifi()
 
-
-
             # Mark Two
             # - Use the HW interrupt of NM3 Flag to wake-up
             # - poll for incoming NM3 messages
             # - Then enable wifi and send to server
-            # - After a time of no NM3 messages disable the wifi and go to sleep
+            # - After a time of no NM3 messages disable the wifi and go to sleep or wfi
+            # - Periodically send a status message over wifi
             elif operating_mode == 1:
+
+                # Cause of wakeup
+                # A) NM3 HW Callback Flag
+                #    Poll the UART for packets
+                #    Put packets as json strings into a queue
+                # B) RTC Callback Flag
+                #    Get some sensor data
+                #    Put data as json string into a queue
+
+                # While there are messages to be sent try and connect to the wifi
+                # if connected to wifi send a message
+
+                # If no flag is set and no messages to be sent (or unable to connect to wifi)
+                # Go to sleep/wait for interrupt
+
+                if _rtc_callback_flag:
+                    _rtc_callback_flag = False  # Clear the flag
+                    status_json = {"Timestamp": utime.time()}
+                    json_to_send_statuses.append(status_json)
+
+                # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
+                if utime.time() < _nm3_callback_seconds + 30:
+                    _nm3_callback_flag = False  # clear the flag
+                    # There may or may not be a message for us. And it could take up to 0.5s to arrive at the uart.
+
+                    nm3_modem.poll_receiver()
+                    nm3_modem.process_incoming_buffer()
+
+                    while nm3_modem.has_received_packet():
+                        print("Has received nm3 message.")
+
+                        message_packet = nm3_modem.get_received_packet()
+                        # Copy the HW triggered timestamps over
+                        message_packet.timestamp = utime.localtime(_nm3_callback_seconds)
+                        message_packet.timestamp_millis = _nm3_callback_millis
+                        message_packet.timestamp_micros = _nm3_callback_micros
+
+                        # Send packet onwards
+                        message_packet_json = message_packet.json()
+
+                        # Append to the queue
+                        json_to_send_messages.append(message_packet_json)
+
+                # If messages or statuses are in the queue
+                if json_to_send_messages or json_to_send_statuses:
+
+                    wifi_connected = is_wifi_connected()
+
+                    if not wifi_connected and not is_wifi_connecting():
+                        # Start the connecting to the wifi
+                        print("Has messages to send. Connecting to wifi")
+                        # Connect to server over wifi
+                        wifi_cfg = load_wifi_config()
+                        if wifi_cfg:
+                            # wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'],
+                            #                                 wifi_cfg['wifi']['password'])  # blocking
+                            start_connect_to_wifi(wifi_cfg['wifi']['ssid'],
+                                                  wifi_cfg['wifi']['password'])  # non-blocking
+                        else:
+                            # Unable to ever connect
+                            json_to_send_messages.clear()
+                            json_to_send_statuses.clear()
+
+                    elif wifi_connected:
+                        # Send the messages
+                        print("Sending message to server")
+                        import mainloop.main.httputil as httputil
+                        http_client = httputil.HttpClient()
+                        import gc
+                        while json_to_send_messages:
+                            message_packet_json = json_to_send_messages.popleft()
+                            gc.collect()
+                            response = http_client.post('http://192.168.4.1:3000/messages/',
+                                                        json=message_packet_json)
+                            # Check for success - resend/queue and resend - TODO
+                            response = None
+                            gc.collect()
+
+                        while json_to_send_statuses:
+                            status_json = json_to_send_statuses.popleft()
+                            gc.collect()
+                            response = http_client.post('http://192.168.4.1:3000/statuses/',
+                                                        json=status_json)
+                            # Check for success - resend/queue and resend - TODO
+                            response = None
+                            gc.collect()
+
+                # If no messages in the queue and too long since last synch and not rtc callback
+                if (not json_to_send_messages) and (not json_to_send_statuses) \
+                        and (utime.time() > _nm3_callback_seconds + 30) and not _rtc_callback_flag:
+                    # Disable the wifi
+                    disconnect_from_wifi()
+                    # Now wait
+                    pyb.wfi()
+
                 pass
 
             # Mark Three
             # - Network Manager TDA-MAC and RTC to control wakeup and sleep timing.
             elif operating_mode == 2:
-
 
                 # Enable power supply to 232 driver
                 pyb.Pin.board.EN_3V3.on()
@@ -383,7 +525,7 @@ def run_mainloop():
                 #    continue
                 # _rtc_callback_flag = False
                 # d. wait for interrupt (wfi)
-                # machine.wfi()
+                # pyb.wfi()
 
                 #
                 # Wake up
