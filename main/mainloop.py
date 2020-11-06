@@ -394,22 +394,28 @@ def run_mainloop():
                         http_client = httputil.HttpClient()
                         import gc
                         while json_to_send_messages:
-                            message_packet_json = json_to_send_messages.popleft()
-                            gc.collect()
-                            response = http_client.post('http://192.168.4.1:3000/messages/',
-                                                        json=message_packet_json)
-                            # Check for success - resend/queue and resend - TODO
-                            response = None
-                            gc.collect()
+                            try:
+                                message_packet_json = json_to_send_messages.popleft()
+                                gc.collect()
+                                response = http_client.post('http://192.168.4.1:3000/messages/',
+                                                            json=message_packet_json)
+                                # Check for success - resend/queue and resend - TODO
+                                response = None
+                                gc.collect()
+                            except Exception:
+                                pass
 
                         while json_to_send_statuses:
-                            status_json = json_to_send_statuses.popleft()
-                            gc.collect()
-                            response = http_client.post('http://192.168.4.1:3000/statuses/',
-                                                        json=status_json)
-                            # Check for success - resend/queue and resend - TODO
-                            response = None
-                            gc.collect()
+                            try:
+                                status_json = json_to_send_statuses.popleft()
+                                gc.collect()
+                                response = http_client.post('http://192.168.4.1:3000/statuses/',
+                                                            json=status_json)
+                                # Check for success - resend/queue and resend - TODO
+                                response = None
+                                gc.collect()
+                            except Exception:
+                                pass
 
                 # If no messages in the queue and too long since last synch and not rtc callback
                 if (not json_to_send_messages) and (not json_to_send_statuses) \
