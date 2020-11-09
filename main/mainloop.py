@@ -341,7 +341,22 @@ def run_mainloop():
 
                 if _rtc_callback_flag:
                     _rtc_callback_flag = False  # Clear the flag
-                    status_json = {"Timestamp": utime.time()}
+
+                    # battery
+                    vbatt = powermodule.get_vbatt_reading()
+
+                    # sensor payload
+                    sensor = sensor_payload.get_sensor_payload_instance()
+                    sensor.start_acquisition()
+                    sensor_acquisition_start = utime.time()
+                    while (not sensor.is_completed()) and (utime.time() < sensor_acquisition_start + 5):
+                        sensor.process_acquisition()
+
+                    sensor_data_json = sensor.get_latest_data_as_json()
+
+                    status_json = {"Timestamp": utime.time(),
+                                   "VBatt": vbatt,
+                                   "Sensors": sensor_data_json}
                     json_to_send_statuses.append(status_json)
 
                 # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
@@ -397,7 +412,7 @@ def run_mainloop():
                             try:
                                 message_packet_json = json_to_send_messages.popleft()
                                 gc.collect()
-                                response = http_client.post('http://192.168.4.1:3000/messages/',
+                                response = http_client.post('http://192.168.4.1:8080/messages/',
                                                             json=message_packet_json)
                                 # Check for success - resend/queue and resend - TODO
                                 response = None
@@ -409,7 +424,7 @@ def run_mainloop():
                             try:
                                 status_json = json_to_send_statuses.popleft()
                                 gc.collect()
-                                response = http_client.post('http://192.168.4.1:3000/statuses/',
+                                response = http_client.post('http://192.168.4.1:8080/statuses/',
                                                             json=status_json)
                                 # Check for success - resend/queue and resend - TODO
                                 response = None
