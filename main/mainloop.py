@@ -75,7 +75,7 @@ def connect_to_wifi(ssid, password):
     if not sta_if.isconnected():
         print('connecting to network...')
         sta_if.active(True)
-        #sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
+        sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
         sta_if.connect(ssid, password)
         while not sta_if.isconnected():
             # Check the status
@@ -105,7 +105,7 @@ def start_connect_to_wifi(ssid, password):
     if not sta_if.isconnected():
         print('connecting to network...')
         sta_if.active(True)
-        #sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
+        sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
         sta_if.connect(ssid, password)
 
         # Check the status
