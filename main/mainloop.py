@@ -417,7 +417,8 @@ def run_mainloop():
                                 # Check for success - resend/queue and resend - TODO
                                 response = None
                                 gc.collect()
-                            except Exception:
+                            except Exception as the_exception:
+                                jotter.get_jotter().jot_exception(the_exception)
                                 pass
 
                         while json_to_send_statuses:
@@ -429,7 +430,8 @@ def run_mainloop():
                                 # Check for success - resend/queue and resend - TODO
                                 response = None
                                 gc.collect()
-                            except Exception:
+                            except Exception as the_exception:
+                                jotter.get_jotter().jot_exception(the_exception)
                                 pass
 
                 # If no messages in the queue and too long since last synch and not rtc callback
