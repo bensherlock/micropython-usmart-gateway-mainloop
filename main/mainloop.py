@@ -263,6 +263,11 @@ def run_mainloop():
     json_to_send_messages = deque((), 10)
     json_to_send_statuses = deque((), 10)
 
+    # Wifi issues
+    # https://github.com/micropython/micropython/issues/4681
+    # The wifi may get stuck in a "connecting" state. Try timeouts and restart the process.
+    wifi_connecting_start_time = 0
+
     while True:
         try:
 
@@ -341,7 +346,7 @@ def run_mainloop():
 
                 if _rtc_callback_flag:
                     _rtc_callback_flag = False  # Clear the flag
-
+                    jotter.get_jotter().jot("RTC Flag. Getting sensor data.", source_file=__name__)
                     # battery
                     vbatt = powermodule.get_vbatt_reading()
 
@@ -369,6 +374,7 @@ def run_mainloop():
 
                     while nm3_modem.has_received_packet():
                         print("Has received nm3 message.")
+                        jotter.get_jotter().jot("Has received nm3 message.", source_file=__name__)
 
                         message_packet = nm3_modem.get_received_packet()
                         # Copy the HW triggered timestamps over
@@ -389,7 +395,8 @@ def run_mainloop():
 
                     if not wifi_connected and not is_wifi_connecting():
                         # Start the connecting to the wifi
-                        print("Has messages to send. Connecting to wifi")
+                        print("Has messages to send. Connecting to wifi.")
+                        jotter.get_jotter().jot("Has messages to send. Connecting to wifi.", source_file=__name__)
                         # Connect to server over wifi
                         wifi_cfg = load_wifi_config()
                         if wifi_cfg:
@@ -397,14 +404,21 @@ def run_mainloop():
                             #                                 wifi_cfg['wifi']['password'])  # blocking
                             start_connect_to_wifi(wifi_cfg['wifi']['ssid'],
                                                   wifi_cfg['wifi']['password'])  # non-blocking
+
+                            wifi_connecting_start_time = utime.time()
                         else:
                             # Unable to ever connect
+                            print("Unable to load wifi config data so cannot connect to wifi. Clearing any messages.")
+                            jotter.get_jotter().jot("Unable to load wifi config data so cannot connect to wifi. "
+                                                    "Clearing any messages.",
+                                                    source_file=__name__)
                             json_to_send_messages.clear()
                             json_to_send_statuses.clear()
 
                     elif wifi_connected:
                         # Send the messages
-                        print("Sending message to server")
+                        print("Connected to wifi. Sending message to server.")
+                        jotter.get_jotter().jot("Connected to wifi. Sending message to server.", source_file=__name__)
                         import mainloop.main.httputil as httputil
                         http_client = httputil.HttpClient()
                         import gc
@@ -434,13 +448,23 @@ def run_mainloop():
                                 jotter.get_jotter().jot_exception(the_exception)
                                 pass
 
+                    elif is_wifi_connecting() and (utime.time() > wifi_connecting_start_time + 30):
+                        # Has been trying to connect for 30 seconds.
+                        print("Connecting to wifi took too long. Disconnecting to retry.")
+                        jotter.get_jotter().jot("Connecting to wifi took too long. Disconnecting to retry.", source_file=__name__)
+                        # Disable the wifi
+                        disconnect_from_wifi()
+
+
                 # If no messages in the queue and too long since last synch and not rtc callback
                 if (not json_to_send_messages) and (not json_to_send_statuses) \
                         and (utime.time() > _nm3_callback_seconds + 30) and not _rtc_callback_flag:
                     # Disable the wifi
                     disconnect_from_wifi()
-                    # Now wait
-                    pyb.wfi()
+                    jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
+                    while (not _rtc_callback_flag) and (not _nm3_callback_flag):
+                        # Now wait
+                        pyb.wfi()
 
                 pass
 
