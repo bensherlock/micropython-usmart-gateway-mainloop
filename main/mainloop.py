@@ -166,7 +166,7 @@ def rtc_callback(unknown):
     # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _rtc_callback_flag
     # RTC Callback function - Toggle LED
-    pyb.LED(2).toggle()
+    #pyb.LED(2).toggle()
     _rtc_callback_flag = True
 
 
@@ -230,6 +230,12 @@ def run_mainloop():
     global _nm3_callback_millis
     global _nm3_callback_micros
 
+    # Firstly Initialise the Watchdog machine.WDT.
+    wdt = machine.WDT(timeout=30000)  # 30 seconds timeout on the watchdog.
+
+    # Now if anything causes us to crashout from here we will reboot automatically.
+
+
     # Set RTC to wakeup at a set interval
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
@@ -267,9 +273,32 @@ def run_mainloop():
     # https://github.com/micropython/micropython/issues/4681
     # The wifi may get stuck in a "connecting" state. Try timeouts and restart the process.
     wifi_connecting_start_time = 0
+    wifi_disconnecting_start_time = 0  # to allow a cooldown time before reconnecting.
+
+    # Uptime
+    uptime_start = utime.time()
+
+    # Last reset cause
+    last_reset_cause = "PWRON_RESET"
+    if machine.reset_cause() == machine.PWRON_RESET:
+        last_reset_cause = "PWRON_RESET"
+    elif machine.reset_cause() == machine.HARD_RESET:
+        last_reset_cause = "HARD_RESET"
+    elif machine.reset_cause() == machine.WDT_RESET:
+        last_reset_cause = "WDT_RESET"
+    elif machine.reset_cause() == machine.DEEPSLEEP_RESET:
+        last_reset_cause = "DEEPSLEEP_RESET"
+    elif machine.reset_cause() == machine.SOFT_RESET:
+        last_reset_cause = "PWRON_RESET"
+    else:
+        last_reset_cause = "UNDEFINED_RESET"
+
+
 
     while True:
         try:
+            # Feed the watchdog
+            wdt.feed()
 
             # Mark One
             # - Continually poll for incoming NM3 messages
@@ -360,6 +389,8 @@ def run_mainloop():
                     sensor_data_json = sensor.get_latest_data_as_json()
 
                     status_json = {"Timestamp": utime.time(),
+                                   "Uptime": (utime.time() - uptime_start),
+                                   "LastResetCause": last_reset_cause,
                                    "VBatt": vbatt,
                                    "Sensors": sensor_data_json}
                     json_to_send_statuses.append(status_json)
@@ -393,7 +424,8 @@ def run_mainloop():
 
                     wifi_connected = is_wifi_connected()
 
-                    if not wifi_connected and not is_wifi_connecting():
+                    if not wifi_connected and not is_wifi_connecting() \
+                            and (utime.time() > wifi_disconnecting_start_time + 2):  # allow short cooldown time on last connection
                         # Start the connecting to the wifi
                         print("Has messages to send. Connecting to wifi.")
                         jotter.get_jotter().jot("Has messages to send. Connecting to wifi.", source_file=__name__)
@@ -453,16 +485,19 @@ def run_mainloop():
                         print("Connecting to wifi took too long. Disconnecting to retry.")
                         jotter.get_jotter().jot("Connecting to wifi took too long. Disconnecting to retry.", source_file=__name__)
                         # Disable the wifi
+                        wifi_disconnecting_start_time = utime.time()
                         disconnect_from_wifi()
-
 
                 # If no messages in the queue and too long since last synch and not rtc callback
                 if (not json_to_send_messages) and (not json_to_send_statuses) \
                         and (utime.time() > _nm3_callback_seconds + 30) and not _rtc_callback_flag:
                     # Disable the wifi
+                    wifi_disconnecting_start_time = utime.time()
                     disconnect_from_wifi()
                     jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
                     while (not _rtc_callback_flag) and (not _nm3_callback_flag):
+                        # Feed the watchdog
+                        wdt.feed()
                         # Now wait
                         pyb.wfi()
 
