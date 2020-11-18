@@ -129,7 +129,11 @@ def is_wifi_connecting():
     """Is the wifi currently trying to connect."""
     import network
     sta_if = network.WLAN(network.STA_IF)
-    # Check the status
+    # Check if active
+    if not sta_if.active():
+        return False
+
+    # Active so check the status
     status = sta_if.status()
     # Constants aren't implemented for PYBD as of MicroPython v1.13.
     # From: https://github.com/micropython/micropython/issues/4682
@@ -140,6 +144,7 @@ def is_wifi_connecting():
         return False
 
     return True
+
 
 def is_wifi_connected():
     """Is the WiFi connected."""
