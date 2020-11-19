@@ -35,6 +35,7 @@
 import json
 import pyb
 import machine
+import network
 from ucollections import deque
 import utime
 
@@ -70,7 +71,6 @@ def load_wifi_config():
 def connect_to_wifi(ssid, password):
     """Connect to the wifi. Return True if successful."""
     """Connects to the wifi with the given ssid and password."""
-    import network
     sta_if = network.WLAN(network.STA_IF)
     if not sta_if.isconnected():
         print('connecting to network...')
@@ -100,13 +100,15 @@ def connect_to_wifi(ssid, password):
 def start_connect_to_wifi(ssid, password):
     """Connect to the wifi. Return True if started ok."""
     """Starts connecting to the wifi with the given ssid and password. Returns before completion."""
-    import network
     sta_if = network.WLAN(network.STA_IF)
     if not sta_if.isconnected():
         print('connecting to network...')
         sta_if.active(True)
         sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
         sta_if.connect(ssid, password)
+
+        # Yield
+        utime.sleep_ms(1)
 
         # Check the status
         status = sta_if.status()
@@ -127,7 +129,6 @@ def start_connect_to_wifi(ssid, password):
 
 def is_wifi_connecting():
     """Is the wifi currently trying to connect."""
-    import network
     sta_if = network.WLAN(network.STA_IF)
     # Check if active
     if not sta_if.active():
@@ -148,20 +149,23 @@ def is_wifi_connecting():
 
 def is_wifi_connected():
     """Is the WiFi connected."""
-    import network
     sta_if = network.WLAN(network.STA_IF)
     return sta_if.isconnected()
 
 
 def disconnect_from_wifi():
     """Disconnect from the wifi and power down the wifi module."""
-    import network
     sta_if = network.WLAN(network.STA_IF)
-    if sta_if.isconnected():
-        sta_if.disconnect()
+
+    # Disconnect
+    sta_if.disconnect()
 
     # Deactivate the WLAN
     sta_if.active(False)
+
+    # Yield
+    utime.sleep_ms(1)
+
 
 
 _rtc_callback_flag = False
@@ -240,7 +244,6 @@ def run_mainloop():
 
     # Now if anything causes us to crashout from here we will reboot automatically.
 
-
     # Set RTC to wakeup at a set interval
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
@@ -297,8 +300,6 @@ def run_mainloop():
         last_reset_cause = "PWRON_RESET"
     else:
         last_reset_cause = "UNDEFINED_RESET"
-
-
 
     while True:
         try:
