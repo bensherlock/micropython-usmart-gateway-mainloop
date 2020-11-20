@@ -53,6 +53,11 @@ micropython.alloc_emergency_exception_buf(100)
 # https://docs.micropython.org/en/latest/reference/isr_rules.html#the-emergency-exception-buffer
 
 
+_wifi_transition_static = 0
+_wifi_transition_connecting = 1
+_wifi_transition_disconnecting = 2
+_wifi_current_transition = _wifi_transition_static
+
 # WiFi
 def load_wifi_config():
     """Load Wifi Configuration from JSON file."""
@@ -91,7 +96,6 @@ def connect_to_wifi(ssid, password):
             #        or (status == network.WLAN.STAT_NO_AP_FOUND) or (status == network.WLAN.STAT_CONNECT_FAIL)):
             # Problems so return
             #    return False
-
     print('network config:', sta_if.ifconfig())
     return True
 
@@ -163,9 +167,11 @@ def disconnect_from_wifi():
     # Deactivate the WLAN
     sta_if.active(False)
 
+    # https://github.com/micropython/micropython/issues/4681
+    sta_if.deinit()
+
     # Yield
     utime.sleep_ms(1)
-
 
 
 _rtc_callback_flag = False
@@ -175,7 +181,7 @@ def rtc_callback(unknown):
     # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _rtc_callback_flag
     # RTC Callback function - Toggle LED
-    #pyb.LED(2).toggle()
+    # pyb.LED(2).toggle()
     _rtc_callback_flag = True
 
 
@@ -238,6 +244,7 @@ def run_mainloop():
     global _nm3_callback_seconds
     global _nm3_callback_millis
     global _nm3_callback_micros
+    global _wifi_current_transition
 
     # Firstly Initialise the Watchdog machine.WDT.
     wdt = machine.WDT(timeout=30000)  # 30 seconds timeout on the watchdog.
@@ -270,6 +277,8 @@ def run_mainloop():
     nm3_modem = Nm3(input_stream=uart, output_stream=uart)
 
     operating_mode = 1  # Mark Two
+
+    _wifi_current_transition = _wifi_transition_static
 
     last_nm3_message_received_time = utime.time()
 
@@ -430,7 +439,14 @@ def run_mainloop():
 
                     wifi_connected = is_wifi_connected()
 
-                    if not wifi_connected and not is_wifi_connecting() \
+                    # Messages to Send - Wifi Connection States
+                    # Idle and disconnecting-cooldown time expired - start connection to wifi
+                    # Connected - send all the messages
+                    # Connecting and Timed out - Disconnect
+                    # Otherwise pause
+
+                    if (not wifi_connected) and \
+                            not (_wifi_current_transition == _wifi_transition_connecting) \
                             and (utime.time() > wifi_disconnecting_start_time + 2):  # allow short cooldown time on last connection
                         # Start the connecting to the wifi
                         print("Has messages to send. Connecting to wifi.")
@@ -444,6 +460,8 @@ def run_mainloop():
                                                   wifi_cfg['wifi']['password'])  # non-blocking
 
                             wifi_connecting_start_time = utime.time()
+
+                            _wifi_current_transition = _wifi_transition_connecting
                         else:
                             # Unable to ever connect
                             print("Unable to load wifi config data so cannot connect to wifi. Clearing any messages.")
@@ -453,8 +471,12 @@ def run_mainloop():
                             json_to_send_messages.clear()
                             json_to_send_statuses.clear()
 
+                            _wifi_current_transition = _wifi_transition_static
+
                     elif wifi_connected:
                         # Send the messages
+                        _wifi_current_transition = _wifi_transition_static
+
                         print("Connected to wifi. Sending message to server.")
                         jotter.get_jotter().jot("Connected to wifi. Sending message to server.", source_file=__name__)
                         import mainloop.main.httputil as httputil
@@ -486,13 +508,19 @@ def run_mainloop():
                                 jotter.get_jotter().jot_exception(the_exception)
                                 pass
 
-                    elif is_wifi_connecting() and (utime.time() > wifi_connecting_start_time + 30):
+                    elif (_wifi_current_transition == _wifi_transition_connecting) and \
+                            (utime.time() > wifi_connecting_start_time + 30):
                         # Has been trying to connect for 30 seconds.
                         print("Connecting to wifi took too long. Disconnecting to retry.")
                         jotter.get_jotter().jot("Connecting to wifi took too long. Disconnecting to retry.", source_file=__name__)
                         # Disable the wifi
                         wifi_disconnecting_start_time = utime.time()
                         disconnect_from_wifi()
+                        _wifi_current_transition = _wifi_transition_disconnecting
+
+                    else:
+                        # Brief pause instead of tight loop
+                        utime.sleep_ms(10)
 
                 # If no messages in the queue and too long since last synch and not rtc callback
                 if (not json_to_send_messages) and (not json_to_send_statuses) \
@@ -500,6 +528,7 @@ def run_mainloop():
                     # Disable the wifi
                     wifi_disconnecting_start_time = utime.time()
                     disconnect_from_wifi()
+                    _wifi_current_transition = _wifi_transition_disconnecting
                     jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
                     while (not _rtc_callback_flag) and (not _nm3_callback_flag):
                         # Feed the watchdog
