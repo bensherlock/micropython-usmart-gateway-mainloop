@@ -279,6 +279,7 @@ def run_mainloop():
     operating_mode = 1  # Mark Two
 
     _wifi_current_transition = _wifi_transition_static
+    wifi_connection_retry_count = 0
 
     last_nm3_message_received_time = utime.time()
 
@@ -456,12 +457,11 @@ def run_mainloop():
                         if wifi_cfg:
                             # wifi_connected = connect_to_wifi(wifi_cfg['wifi']['ssid'],
                             #                                 wifi_cfg['wifi']['password'])  # blocking
-                            start_connect_to_wifi(wifi_cfg['wifi']['ssid'],
-                                                  wifi_cfg['wifi']['password'])  # non-blocking
-
-                            wifi_connecting_start_time = utime.time()
-
-                            _wifi_current_transition = _wifi_transition_connecting
+                            if start_connect_to_wifi(wifi_cfg['wifi']['ssid'],
+                                                  wifi_cfg['wifi']['password']):  # non-blocking
+                                wifi_connecting_start_time = utime.time()
+                                _wifi_current_transition = _wifi_transition_connecting
+                                wifi_connection_retry_count = wifi_connection_retry_count + 1
                         else:
                             # Unable to ever connect
                             print("Unable to load wifi config data so cannot connect to wifi. Clearing any messages.")
@@ -476,6 +476,7 @@ def run_mainloop():
                     elif wifi_connected:
                         # Send the messages
                         _wifi_current_transition = _wifi_transition_static
+                        wifi_connection_retry_count = 0
 
                         print("Connected to wifi. Sending message to server.")
                         jotter.get_jotter().jot("Connected to wifi. Sending message to server.", source_file=__name__)
@@ -523,11 +524,14 @@ def run_mainloop():
                         utime.sleep_ms(10)
 
                 # If no messages in the queue and too long since last synch and not rtc callback
-                if (not json_to_send_messages) and (not json_to_send_statuses) \
-                        and (utime.time() > _nm3_callback_seconds + 30) and not _rtc_callback_flag:
+                if not _rtc_callback_flag and \
+                        ((wifi_connection_retry_count > 5) or
+                         ((not json_to_send_messages) and (not json_to_send_statuses)
+                          and (utime.time() > _nm3_callback_seconds + 30))):
                     # Disable the wifi
                     wifi_disconnecting_start_time = utime.time()
                     disconnect_from_wifi()
+                    wifi_connection_retry_count = 0
                     _wifi_current_transition = _wifi_transition_disconnecting
                     jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
                     while (not _rtc_callback_flag) and (not _nm3_callback_flag):
