@@ -36,6 +36,7 @@ import json
 import pyb
 import machine
 import network
+import os
 from ucollections import deque
 import utime
 
@@ -175,14 +176,32 @@ def disconnect_from_wifi():
 
 
 _rtc_callback_flag = False
+_rtc_alarm_period_s = 10
+_rtc_next_alarm_time_s = 0
+
+
+def rtc_set_alarm_period_s(alarm_period_s):
+    """Set the alarm period in seconds. Updates the next alarm time from now. If 0 then cancels the alarm."""
+    global _rtc_alarm_period_s
+    global _rtc_next_alarm_time_s
+    _rtc_alarm_period_s = alarm_period_s
+    if _rtc_alarm_period_s > 0:
+        _rtc_next_alarm_time_s = utime.time() + _rtc_alarm_period_s
+    else:
+        _rtc_next_alarm_time_s = 0  # cancel the alarm
 
 
 def rtc_callback(unknown):
     # NB: You cannot do anything that allocates memory in this interrupt handler.
     global _rtc_callback_flag
-    # RTC Callback function - Toggle LED
+    global _rtc_alarm_period_s
+    global _rtc_next_alarm_time_s
+    # RTC Callback function - called once per second
     # pyb.LED(2).toggle()
-    _rtc_callback_flag = True
+    # Only set flag if it is alarm time
+    if 0 < _rtc_next_alarm_time_s <= utime.time():
+        _rtc_callback_flag = True
+        _rtc_next_alarm_time_s = _rtc_next_alarm_time_s + _rtc_alarm_period_s  # keep the period consistent
 
 
 _nm3_callback_flag = False
@@ -246,7 +265,7 @@ def run_mainloop():
     global _nm3_callback_micros
     global _wifi_current_transition
 
-    # Firstly Initialise the Watchdog machine.WDT.
+    # Firstly Initialise the Watchdog machine.WDT. This cannot now be stopped and *must* be fed.
     wdt = machine.WDT(timeout=30000)  # 30 seconds timeout on the watchdog.
 
     # Now if anything causes us to crashout from here we will reboot automatically.
@@ -255,7 +274,11 @@ def run_mainloop():
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
     # A default wakeup to start with. To be overridden by network manager/sleep manager
-    rtc.wakeup(1 * 60 * 1000, rtc_callback)  # milliseconds
+    rtc.wakeup(1000, rtc_callback)  # milliseconds - Every 1 second
+
+    rtc_set_alarm_period_s(20 * 60)  # Every 20 minutes to do the status
+    _rtc_callback_flag = True  # Set the flag so we do a status message on startup.
+
 
     # Enable the NM3 power supply on the powermodule
     powermodule = PowerModule()
@@ -313,8 +336,13 @@ def run_mainloop():
 
     while True:
         try:
+            # First entry in the while loop and also after a caught exception
+
             # Feed the watchdog
             wdt.feed()
+
+            # Enable power supply to 232 driver and onboard sensors
+            pyb.Pin.board.EN_3V3.on()
 
             # Mark One
             # - Continually poll for incoming NM3 messages
@@ -414,6 +442,7 @@ def run_mainloop():
                 # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
                 if utime.time() < _nm3_callback_seconds + 30:
                     _nm3_callback_flag = False  # clear the flag
+
                     # There may or may not be a message for us. And it could take up to 0.5s to arrive at the uart.
 
                     nm3_modem.poll_receiver()
@@ -434,6 +463,15 @@ def run_mainloop():
 
                         # Append to the queue
                         json_to_send_messages.append(message_packet_json)
+
+                        # Process special packets
+                        if message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USMRT':
+                            print("Reset message received.")
+                            jotter.get_jotter().jot("Reset message received.", source_file=__name__)
+                            # Reset the device
+                            machine.reset()
+
+
 
                 # If messages or statuses are in the queue
                 if json_to_send_messages or json_to_send_statuses:
@@ -535,12 +573,23 @@ def run_mainloop():
                     _wifi_current_transition = _wifi_transition_disconnecting
                     jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
                     while (not _rtc_callback_flag) and (not _nm3_callback_flag):
+                        # Disable power supply to 232 driver and onboard sensors
+                        pyb.Pin.board.EN_3V3.off()
+                        # Turn off the USB
+                        pyb.usb_mode(None)
                         # Feed the watchdog
                         wdt.feed()
                         # Now wait
-                        pyb.wfi()
+                        # pyb.wfi()  # wait-for-interrupt (can be ours or the system tick every 1ms or anything else)
+                        machine.lightsleep()  # lightsleep
+                        # Yield briefly on wakeup
+                        utime.sleep_ms(50)
 
-                pass
+                    # Wake-up
+                    # Enable power supply to 232 driver and onboard sensors
+                    pyb.Pin.board.EN_3V3.on()  # So we can start receiving serial comms into the buffers asap.
+
+                pass  # end of elif operating_mode == 1:
 
             # Mark Three
             # - Network Manager TDA-MAC and RTC to control wakeup and sleep timing.
