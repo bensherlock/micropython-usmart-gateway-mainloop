@@ -171,8 +171,8 @@ def disconnect_from_wifi():
     # https://github.com/micropython/micropython/issues/4681
     sta_if.deinit()
 
-    # Yield
-    utime.sleep_ms(1)
+    # Give it time to shutdown
+    utime.sleep_ms(100)
 
 
 _rtc_callback_flag = False
@@ -196,7 +196,7 @@ def rtc_callback(unknown):
     global _rtc_callback_flag
     global _rtc_alarm_period_s
     global _rtc_next_alarm_time_s
-    # RTC Callback function - called once per second
+    # RTC Callback function -
     # pyb.LED(2).toggle()
     # Only set flag if it is alarm time
     if 0 < _rtc_next_alarm_time_s <= utime.time():
@@ -270,25 +270,37 @@ def run_mainloop():
 
     # Now if anything causes us to crashout from here we will reboot automatically.
 
+    # https://pybd.io/hw/pybd_sfxw.html
+    # The CPU frequency can be set to any multiple of 2MHz between 48MHz and 216MHz, via machine.freq(<freq>).
+    # By default the SF2 model runs at 120MHz and the SF6 model at 144MHz in order to conserve electricity.
+    # It is possible to go below 48MHz but then the WiFi cannot be used.
+    machine.freq(48000000)  # Set to lowest usable frequency
+
+
     # Set RTC to wakeup at a set interval
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
     # A default wakeup to start with. To be overridden by network manager/sleep manager
-    rtc.wakeup(1000, rtc_callback)  # milliseconds - Every 1 second
+    rtc.wakeup(10 * 1000, rtc_callback)  # milliseconds - # Every 10 seconds
 
-    rtc_set_alarm_period_s(20 * 60)  # Every 20 minutes to do the status
+    rtc_set_alarm_period_s(60 * 60)  # Every 60 minutes to do the status
     _rtc_callback_flag = True  # Set the flag so we do a status message on startup.
 
+    pyb.LED(2).on()  # Green LED On
 
-    # Enable the NM3 power supply on the powermodule
+    # Cycle the NM3 power supply on the powermodule
     powermodule = PowerModule()
-    powermodule.enable_nm3()
+    powermodule.disable_nm3()
 
-    # Enable power supply to 232 driver
+    # Enable power supply to 232 driver and sensors and sdcard
     pyb.Pin.board.EN_3V3.on()
     pyb.Pin('Y5', pyb.Pin.OUT, value=0)  # enable Y5 Pin as output
     max3221e = MAX3221E(pyb.Pin.board.Y5)
     max3221e.tx_force_off()  # Disable Tx Driver
+
+    utime.sleep_ms(1000)
+    powermodule.enable_nm3()
+    utime.sleep_ms(7000)  # Await end of bootloader
 
     # Set callback for nm3 pin change - line goes high on frame synchronisation
     # make sure it is clear first
@@ -309,6 +321,10 @@ def run_mainloop():
     # Micropython needs a defined size of deque
     json_to_send_messages = deque((), 10)
     json_to_send_statuses = deque((), 10)
+
+    # Sequence Numbers to identify duplicate http sends.
+    status_seq = 0
+    message_seq = 0
 
     # Wifi issues
     # https://github.com/micropython/micropython/issues/4681
@@ -334,15 +350,22 @@ def run_mainloop():
     else:
         last_reset_cause = "UNDEFINED_RESET"
 
+    # Turn off the USB
+    pyb.usb_mode(None)
+
     while True:
         try:
             # First entry in the while loop and also after a caught exception
+            # pyb.LED(2).on()  # Awake
 
             # Feed the watchdog
             wdt.feed()
 
-            # Enable power supply to 232 driver and onboard sensors
+            # Enable power supply to 232 driver, sensors, and SDCard
             pyb.Pin.board.EN_3V3.on()
+
+            # Brief pause instead of tight loop
+            utime.sleep_ms(10)
 
             # Mark One
             # - Continually poll for incoming NM3 messages
@@ -432,11 +455,19 @@ def run_mainloop():
 
                     sensor_data_json = sensor.get_latest_data_as_json()
 
-                    status_json = {"Timestamp": utime.time(),
-                                   "Uptime": (utime.time() - uptime_start),
-                                   "LastResetCause": last_reset_cause,
-                                   "VBatt": vbatt,
-                                   "Sensors": sensor_data_json}
+                    status_json = {"Status": {"Timestamp": utime.time(),
+                                              "Uptime": (utime.time() - uptime_start),
+                                              "LastResetCause": last_reset_cause,
+                                              "VBatt": vbatt,
+                                              "Sensors": sensor_data_json},
+                                   "SeqNo": status_seq,
+                                   "Retry": 0}
+
+                    status_seq = status_seq + 1
+                    if status_seq >= 65536:  # Aribtrary limit to 16-bit uint.
+                        status_seq = 0
+
+                    # Append to queue
                     json_to_send_statuses.append(status_json)
 
                 # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
@@ -449,7 +480,7 @@ def run_mainloop():
                     nm3_modem.process_incoming_buffer()
 
                     while nm3_modem.has_received_packet():
-                        print("Has received nm3 message.")
+                        # print("Has received nm3 message.")
                         jotter.get_jotter().jot("Has received nm3 message.", source_file=__name__)
 
                         message_packet = nm3_modem.get_received_packet()
@@ -461,17 +492,22 @@ def run_mainloop():
                         # Send packet onwards
                         message_packet_json = message_packet.json()
 
+                        message_json = {"Message": message_packet_json,
+                                        "SeqNo": message_seq,
+                                        "Retry": 0}
+                        message_seq = message_seq + 1
+                        if message_seq >= 65536:  # Aribtrary limit to 16-bit uint.
+                            message_seq = 0
+
                         # Append to the queue
-                        json_to_send_messages.append(message_packet_json)
+                        json_to_send_messages.append(message_json)
 
                         # Process special packets
                         if message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USMRT':
-                            print("Reset message received.")
+                            # print("Reset message received.")
                             jotter.get_jotter().jot("Reset message received.", source_file=__name__)
                             # Reset the device
                             machine.reset()
-
-
 
                 # If messages or statuses are in the queue
                 if json_to_send_messages or json_to_send_statuses:
@@ -488,7 +524,7 @@ def run_mainloop():
                             not (_wifi_current_transition == _wifi_transition_connecting) \
                             and (utime.time() > wifi_disconnecting_start_time + 2):  # allow short cooldown time on last connection
                         # Start the connecting to the wifi
-                        print("Has messages to send. Connecting to wifi.")
+                        # print("Has messages to send. Connecting to wifi.")
                         jotter.get_jotter().jot("Has messages to send. Connecting to wifi.", source_file=__name__)
                         # Connect to server over wifi
                         wifi_cfg = load_wifi_config()
@@ -502,7 +538,7 @@ def run_mainloop():
                                 wifi_connection_retry_count = wifi_connection_retry_count + 1
                         else:
                             # Unable to ever connect
-                            print("Unable to load wifi config data so cannot connect to wifi. Clearing any messages.")
+                            # print("Unable to load wifi config data so cannot connect to wifi. Clearing any messages.")
                             jotter.get_jotter().jot("Unable to load wifi config data so cannot connect to wifi. "
                                                     "Clearing any messages.",
                                                     source_file=__name__)
@@ -516,41 +552,67 @@ def run_mainloop():
                         _wifi_current_transition = _wifi_transition_static
                         wifi_connection_retry_count = 0
 
-                        print("Connected to wifi. Sending message to server.")
+                        # print("Connected to wifi. Sending message to server.")
                         jotter.get_jotter().jot("Connected to wifi. Sending message to server.", source_file=__name__)
                         import mainloop.main.httputil as httputil
                         http_client = httputil.HttpClient()
                         import gc
                         while json_to_send_messages:
-                            try:
-                                message_packet_json = json_to_send_messages.popleft()
-                                gc.collect()
-                                response = http_client.post('http://192.168.4.1:8080/messages/',
-                                                            json=message_packet_json)
-                                # Check for success - resend/queue and resend - TODO
-                                response = None
-                                gc.collect()
-                            except Exception as the_exception:
-                                jotter.get_jotter().jot_exception(the_exception)
-                                pass
+                            message_json = json_to_send_messages.popleft()
+                            retry_count = 0
+                            success_flag = False
+
+                            while not success_flag and retry_count < 4:
+                                message_json["Retry"] = retry_count
+                                retry_count = retry_count + 1
+
+                                try:
+                                    gc.collect()
+                                    response = http_client.post('http://192.168.4.1:8080/messages/',
+                                                                json=message_json)
+                                    # Check for success - resend/queue and resend
+                                    if 200 <= response.status_code < 300:
+                                        # Success
+                                        success_flag = True
+                                    response = None
+                                    gc.collect()
+                                except Exception as the_exception:
+                                    jotter.get_jotter().jot_exception(the_exception)
+                                    pass
+
+                                # Brief delay
+                                utime.sleep_ms(10)
 
                         while json_to_send_statuses:
-                            try:
-                                status_json = json_to_send_statuses.popleft()
-                                gc.collect()
-                                response = http_client.post('http://192.168.4.1:8080/statuses/',
-                                                            json=status_json)
-                                # Check for success - resend/queue and resend - TODO
-                                response = None
-                                gc.collect()
-                            except Exception as the_exception:
-                                jotter.get_jotter().jot_exception(the_exception)
-                                pass
+                            status_json = json_to_send_statuses.popleft()
+                            retry_count = 0
+                            success_flag = False
+
+                            while not success_flag and retry_count < 4:
+                                status_json["Retry"] = retry_count
+                                retry_count = retry_count + 1
+
+                                try:
+                                    gc.collect()
+                                    response = http_client.post('http://192.168.4.1:8080/statuses/',
+                                                                json=status_json)
+                                    # Check for success - resend/queue and resend
+                                    if 200 <= response.status_code < 300:
+                                        # Success
+                                        success_flag = True
+                                    response = None
+                                    gc.collect()
+                                except Exception as the_exception:
+                                    jotter.get_jotter().jot_exception(the_exception)
+                                    pass
+
+                                # Brief delay
+                                utime.sleep_ms(10)
 
                     elif (_wifi_current_transition == _wifi_transition_connecting) and \
                             (utime.time() > wifi_connecting_start_time + 30):
                         # Has been trying to connect for 30 seconds.
-                        print("Connecting to wifi took too long. Disconnecting to retry.")
+                        # print("Connecting to wifi took too long. Disconnecting to retry.")
                         jotter.get_jotter().jot("Connecting to wifi took too long. Disconnecting to retry.", source_file=__name__)
                         # Disable the wifi
                         wifi_disconnecting_start_time = utime.time()
@@ -568,26 +630,43 @@ def run_mainloop():
                           and (utime.time() > _nm3_callback_seconds + 30))):
                     # Disable the wifi
                     wifi_disconnecting_start_time = utime.time()
-                    disconnect_from_wifi()
+                    disconnect_from_wifi()  # Need to give the OS time to do this and power down the wifi chip.
                     wifi_connection_retry_count = 0
                     _wifi_current_transition = _wifi_transition_disconnecting
-                    jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
-                    while (not _rtc_callback_flag) and (not _nm3_callback_flag):
-                        # Disable power supply to 232 driver and onboard sensors
+                    while (not _rtc_callback_flag) and (not _nm3_callback_flag) and (utime.time() < wifi_disconnecting_start_time + 5):
+                        # Feed the watchdog
+                        wdt.feed()
+                        # Give the wifi time to sleep
+                        utime.sleep_ms(100)
+
+                    # Double check the flags before powering things off
+                    if (not _rtc_callback_flag) and (not _nm3_callback_flag):
+                        jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
+                        # Disable the I2C pullups
+                        pyb.Pin('PULL_SCL', pyb.Pin.IN)  # disable 5.6kOhm X9/SCL pull-up
+                        pyb.Pin('PULL_SDA', pyb.Pin.IN)  # disable 5.6kOhm X10/SDA pull-up
+                        # Disable power supply to 232 driver, sensors, and SDCard
                         pyb.Pin.board.EN_3V3.off()
-                        # Turn off the USB
-                        pyb.usb_mode(None)
+                        pyb.LED(2).off()  # Asleep
+                        utime.sleep_ms(10)
+
+                    while (not _rtc_callback_flag) and (not _nm3_callback_flag):
                         # Feed the watchdog
                         wdt.feed()
                         # Now wait
+                        utime.sleep_ms(10)
                         # pyb.wfi()  # wait-for-interrupt (can be ours or the system tick every 1ms or anything else)
-                        machine.lightsleep()  # lightsleep
-                        # Yield briefly on wakeup
-                        utime.sleep_ms(50)
+                        machine.lightsleep()  # lightsleep - don't use the time as this then overrides the RTC
 
                     # Wake-up
-                    # Enable power supply to 232 driver and onboard sensors
-                    pyb.Pin.board.EN_3V3.on()  # So we can start receiving serial comms into the buffers asap.
+                    # pyb.LED(2).on()  # Awake
+                    # Feed the watchdog
+                    wdt.feed()
+                    # Enable power supply to 232 driver, sensors, and SDCard
+                    pyb.Pin.board.EN_3V3.on()
+                    # Enable the I2C pullups
+                    pyb.Pin('PULL_SCL', pyb.Pin.OUT, value=1)  # enable 5.6kOhm X9/SCL pull-up
+                    pyb.Pin('PULL_SDA', pyb.Pin.OUT, value=1)  # enable 5.6kOhm X10/SDA pull-up
 
                 pass  # end of elif operating_mode == 1:
 
