@@ -116,7 +116,7 @@ def start_connect_to_wifi(ssid, password):
         sta_if.connect(ssid, password)
 
         # Yield
-        utime.sleep_ms(1)
+        utime.sleep_ms(100)
 
         # Check the status
         status = sta_if.status()
@@ -188,6 +188,7 @@ def rtc_set_next_alarm_time_s(alarm_time_s_from_now):
 
     if 0 < alarm_time_s_from_now <= 7200:  # above zero and up to two hours
         _rtc_next_alarm_time_s = utime.time() + alarm_time_s_from_now
+        print("_rtc_next_alarm_time_s=" + str(_rtc_next_alarm_time_s) + " time now=" + str(utime.time()))
 
 
 def rtc_set_alarm_period_s(alarm_period_s):
@@ -199,6 +200,8 @@ def rtc_set_alarm_period_s(alarm_period_s):
         _rtc_next_alarm_time_s = utime.time() + _rtc_alarm_period_s
     else:
         _rtc_next_alarm_time_s = 0  # cancel the alarm
+
+    print("_rtc_next_alarm_time_s=" + str(_rtc_next_alarm_time_s) + " time now=" + str(utime.time()))
 
 
 _rtc_callback_seconds = 0  # can be used to stay awake for X seconds after the last RTC wakeup
@@ -331,11 +334,17 @@ def run_mainloop():
     pyb.Pin.board.EN_3V3.on()
     pyb.Pin('Y5', pyb.Pin.OUT, value=0)  # enable Y5 Pin as output
     max3221e = MAX3221E(pyb.Pin.board.Y5)
-    max3221e.tx_force_off()  # Disable Tx Driver
+    max3221e.tx_force_on()  # Enable Tx Driver
 
-    utime.sleep_ms(1000)
+    # Feed the watchdog
+    wdt.feed()
+
+    utime.sleep_ms(10000)
     powermodule.enable_nm3()
-    utime.sleep_ms(7000)  # Await end of bootloader
+    utime.sleep_ms(10000)  # Await end of bootloader
+
+    # Feed the watchdog
+    wdt.feed()
 
     # Set callback for nm3 pin change - line goes high on frame synchronisation
     # make sure it is clear first
@@ -345,11 +354,26 @@ def run_mainloop():
     # Serial Port/UART is opened with a 100ms timeout for reading - non-blocking.
     uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=100)
     nm3_modem = Nm3(input_stream=uart, output_stream=uart)
+    utime.sleep_ms(20)
 
     # Grab address and voltage from the modem
     nm3_address = nm3_modem.get_address()
+    utime.sleep_ms(20)
     nm3_voltage = nm3_modem.get_battery_voltage()
+    utime.sleep_ms(20)
     print("NM3 Address {:03d} Voltage {:0.2f}V.".format(nm3_address, nm3_voltage))
+
+    # Sometimes (maybe from brownout) restarting the modem leaves it in a state where you can talk to it on the
+    # UART fine, but there's no ability to receive incoming acoustic comms until the modem has been fired.
+    # So here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
+    alive_string = "UA" + "{:03d}".format(nm3_address) + "B{:0.2f}V".format(nm3_voltage)
+    nm3_modem.send_broadcast_message(alive_string.encode('utf-8'))
+
+    # Feed the watchdog
+    wdt.feed()
+
+    # Delay for transmission of broadcast packet
+    utime.sleep_ms(500)
 
     operating_mode = 2  # Mark Three
 
@@ -383,6 +407,7 @@ def run_mainloop():
     network_cycle_limit = 6  # 6 hourly
     network_frame_interval_s = 3600  # 1 hour
     network_next_frame_time_s = utime.time()  # Non-zero value to start from
+    network_is_configured = False
     network_do_configuration = False
     network_config_is_stale = True
 
@@ -656,7 +681,7 @@ def run_mainloop():
                     elif (_wifi_current_transition == _wifi_transition_connecting) and \
                             (utime.time() > wifi_connecting_start_time + 30):
                         # Has been trying to connect for 30 seconds.
-                        # print("Connecting to wifi took too long. Disconnecting to retry.")
+                        print("Connecting to wifi took too long. Disconnecting to retry.")
                         jotter.get_jotter().jot("Connecting to wifi took too long. Disconnecting to retry.", source_file=__name__)
                         # Disable the wifi
                         wifi_disconnecting_start_time = utime.time()
@@ -750,7 +775,7 @@ def run_mainloop():
 
                 if _rtc_callback_flag:
                     _rtc_callback_flag = False  # Clear the flag
-                    print("RTC Flag. Powering up NM3 and getting sensor data.")
+                    print("RTC Flag. Powering up NM3 and getting sensor data." + " time now=" + str(utime.time()))
                     jotter.get_jotter().jot("RTC Flag. Powering up NM3 and getting sensor data. ", source_file=__name__)
 
                     # Enable power supply to 232 driver and sensors and sdcard
@@ -858,10 +883,12 @@ def run_mainloop():
                         # Reinitialse the network protocol
                         net_protocol.init(nm3_modem, network_node_addresses, wdt)
                         # Then do discovery
-                        net_protocol.do_net_discovery()
-                        net_protocol.setup_net_schedule(network_guard_interval_ms)  # guard interval [msec] can be specified as function input (default: 500)
-                        network_cycle_counter = 0
-                        network_do_configuration = False
+                        network_is_configured = False
+                        if net_protocol.do_net_discovery():
+                            net_protocol.setup_net_schedule(network_guard_interval_ms)  # guard interval [msec] can be specified as function input (default: 500)
+                            network_cycle_counter = 0
+                            network_do_configuration = False
+                            network_is_configured = True
 
                     # Extract network topology and schedule information as JSON
                     net_info_json = net_protocol.get_net_info_json()
@@ -886,30 +913,31 @@ def run_mainloop():
 
                     json_to_send_network_topologies.append(network_topology_json)
 
-                    print("Gathering data from network.")
-                    jotter.get_jotter().jot("Gathering data from network.", source_file=__name__)
-                    # Do a data gather
-                    time_till_next_frame = network_frame_interval_s * 1000  # for sleep synchronisation (this can also be variable between frames)
-                    network_next_frame_time_s = network_next_frame_time_s + network_frame_interval_s
-                    rtc_set_next_alarm_time_s(network_next_frame_time_s - utime.time() - 60)  # set the next wakeup time to be 60 seconds before the next frame time
-                    packets = net_protocol.gather_sensor_data(time_till_next_frame, network_nm3_sensor_stay_awake)
-                    network_cycle_counter = network_cycle_counter + 1
+                    if network_is_configured:
+                        print("Gathering data from network.")
+                        jotter.get_jotter().jot("Gathering data from network.", source_file=__name__)
+                        # Do a data gather
+                        time_till_next_frame = network_frame_interval_s * 1000  # for sleep synchronisation (this can also be variable between frames)
+                        network_next_frame_time_s = network_next_frame_time_s + network_frame_interval_s
+                        rtc_set_next_alarm_time_s(network_next_frame_time_s - utime.time() - 60)  # set the next wakeup time to be 60 seconds before the next frame time
+                        packets = net_protocol.gather_sensor_data(time_till_next_frame, network_nm3_sensor_stay_awake)
+                        network_cycle_counter = network_cycle_counter + 1
 
-                    for message_packet in packets:
-                        # Send packet onwards
-                        message_packet_json = message_packet.json()
-                        # Needs changing: https://google.github.io/styleguide/jsoncstyleguide.xml?showone=Property_Name_Format#Property_Name_Format
-                        # camelCase for propertyNames.
-                        message_json = {"Message": message_packet_json,
-                                        "timestamp": utime.time(),
-                                        "SeqNo": message_seq,
-                                        "Retry": 0}
-                        message_seq = message_seq + 1
-                        if message_seq >= 65536:  # Aribtrary limit to 16-bit uint.
-                            message_seq = 0
+                        for message_packet in packets:
+                            # Send packet onwards
+                            message_packet_json = message_packet.json()
+                            # Needs changing: https://google.github.io/styleguide/jsoncstyleguide.xml?showone=Property_Name_Format#Property_Name_Format
+                            # camelCase for propertyNames.
+                            message_json = {"Message": message_packet_json,
+                                            "timestamp": utime.time(),
+                                            "SeqNo": message_seq,
+                                            "Retry": 0}
+                            message_seq = message_seq + 1
+                            if message_seq >= 65536:  # Aribtrary limit to 16-bit uint.
+                                message_seq = 0
 
-                        # Append to the queue
-                        json_to_send_messages.append(message_json)
+                            # Append to the queue
+                            json_to_send_messages.append(message_json)
 
                     pass
 
