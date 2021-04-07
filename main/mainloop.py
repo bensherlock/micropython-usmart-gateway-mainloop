@@ -111,8 +111,8 @@ def start_connect_to_wifi(ssid, password):
     if not sta_if.isconnected():
         print('connecting to network...')
         sta_if.active(True)
-        #sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
-        sta_if.config(antenna=0)  # select antenna, 0=chip, 1=external DEV Mode
+        sta_if.config(antenna=1)  # select antenna, 0=chip, 1=external
+        #sta_if.config(antenna=0)  # select antenna, 0=chip, 1=external DEV Mode
         sta_if.connect(ssid, password)
 
         # Yield
@@ -272,6 +272,23 @@ def do_local_sensor_reading():
         gc.collect()
 
 
+def send_usmart_alive_message(modem):
+    # Send a standard broadcast Alive message. Usually called on startup and on request by external message.
+    # Grab address and voltage from the modem
+    if modem:
+        nm3_address = modem.get_address()
+        utime.sleep_ms(20)
+        nm3_voltage = modem.get_battery_voltage()
+        utime.sleep_ms(20)
+        # print("NM3 Address {:03d} Voltage {:0.2f}V.".format(nm3_address, nm3_voltage))
+        # jotter.get_jotter().jot("NM3 Address {:03d} Voltage {:0.2f}V.".format(nm3_address, nm3_voltage),
+        #                        source_file=__name__)
+        # So here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
+        # Plus a version/date so we can determine if an OTA update has worked
+        alive_string = "UA" + "{:03d}".format(nm3_address) + "B{:0.2f}V".format(nm3_voltage) + "REV:2021-04-07T11:49:00"
+        modem.send_broadcast_message(alive_string.encode('utf-8'))
+
+
 # Standard Interface for MainLoop
 # - def run_mainloop() : never returns
 def run_mainloop():
@@ -365,9 +382,8 @@ def run_mainloop():
 
     # Sometimes (maybe from brownout) restarting the modem leaves it in a state where you can talk to it on the
     # UART fine, but there's no ability to receive incoming acoustic comms until the modem has been fired.
-    # So here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
-    alive_string = "UA" + "{:03d}".format(nm3_address) + "B{:0.2f}V".format(nm3_voltage)
-    nm3_modem.send_broadcast_message(alive_string.encode('utf-8'))
+    send_usmart_alive_message(nm3_modem)
+
 
     # Feed the watchdog
     wdt.feed()
@@ -383,7 +399,7 @@ def run_mainloop():
     last_nm3_message_received_time = utime.time()
 
     # Micropython needs a defined size of deque
-    json_to_send_messages = deque((), 10)  # Incoming NM3 Messages
+    json_to_send_messages = deque((), 50)  # Incoming NM3 Messages
     json_to_send_statuses = deque((), 10)  # Sensors and VBatt and Uptime
     json_to_send_network_topologies = deque((), 10)  # Network topology from uac_network
 
@@ -826,7 +842,7 @@ def run_mainloop():
 
 
                 # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
-                if utime.time() < _nm3_callback_seconds + 30:
+                if _nm3_callback_flag or (utime.time() < _nm3_callback_seconds + 30):
                     if _nm3_callback_flag:
                         print("Has received nm3 synch flag.")
 
@@ -869,6 +885,11 @@ def run_mainloop():
                             # Reset the device
                             machine.reset()
 
+                        if message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USPNG':
+                            # print("PNG message received.")
+                            jotter.get_jotter().jot("PNG message received.", source_file=__name__)
+                            send_usmart_alive_message(nm3_modem)
+
                 # If time to do the network data gather/configuration Only do network if we have any nodes to talk to
                 if network_node_addresses and network_next_frame_time_s <= utime.time():
                     print("Time for network frame.")
@@ -889,6 +910,7 @@ def run_mainloop():
                             network_cycle_counter = 0
                             network_do_configuration = False
                             network_is_configured = True
+                            network_next_frame_time_s = utime.time() # Set the epoch to now
 
                     # Extract network topology and schedule information as JSON
                     net_info_json = net_protocol.get_net_info_json()
@@ -917,9 +939,14 @@ def run_mainloop():
                         print("Gathering data from network.")
                         jotter.get_jotter().jot("Gathering data from network.", source_file=__name__)
                         # Do a data gather
-                        time_till_next_frame = network_frame_interval_s * 1000  # for sleep synchronisation (this can also be variable between frames)
                         network_next_frame_time_s = network_next_frame_time_s + network_frame_interval_s
+                        # time_till_next_frame = network_frame_interval_s * 1000
+                        time_till_next_frame = (network_next_frame_time_s - utime.time()) * 1000  # for sleep synchronisation (this can also be variable between frames)
                         rtc_set_next_alarm_time_s(network_next_frame_time_s - utime.time() - 60)  # set the next wakeup time to be 60 seconds before the next frame time
+
+                        print("network_next_frame_time_s=" + str(network_next_frame_time_s)
+                              + " time_till_next_frame=" + str(time_till_next_frame))
+
                         packets = net_protocol.gather_sensor_data(time_till_next_frame, network_nm3_sensor_stay_awake)
                         network_cycle_counter = network_cycle_counter + 1
 
@@ -994,9 +1021,9 @@ def run_mainloop():
                         http_client = httputil.HttpClient()
                         import gc
 
-                        print("Getting network config from server.")
-                        jotter.get_jotter().jot("Getting network config from server.", source_file=__name__)
                         if network_config_is_stale:
+                            print("Getting network config from server.")
+                            jotter.get_jotter().jot("Getting network config from server.", source_file=__name__)
                             retry_count = 0
                             success_flag = False
                             network_config_json = None
@@ -1015,6 +1042,8 @@ def run_mainloop():
                                     response = None
                                     gc.collect()
                                 except Exception as the_exception:
+                                    import sys
+                                    sys.print_exception(the_exception)
                                     jotter.get_jotter().jot_exception(the_exception)
                                     pass
 
@@ -1037,10 +1066,16 @@ def run_mainloop():
                                             network_do_configuration = True
                                             break
                                 network_node_addresses = node_addresses
-                                network_config_is_stale = False
 
-                        print("Sending messages to server.")
-                        jotter.get_jotter().jot("Sending messages to server.", source_file=__name__)
+                            # Even if we failed to download it, set as not stale so we go to sleep and try next time.
+                            # If wifi works but the server isn't running we would get stuck in a tight loop retrying
+                            # to get network config.
+                            network_config_is_stale = False
+
+                        if json_to_send_messages:
+                            print("Sending messages to server.")
+                            jotter.get_jotter().jot("Sending messages to server.", source_file=__name__)
+
                         while json_to_send_messages:
                             message_json = json_to_send_messages.popleft()
                             retry_count = 0
@@ -1061,14 +1096,18 @@ def run_mainloop():
                                     response = None
                                     gc.collect()
                                 except Exception as the_exception:
+                                    import sys
+                                    sys.print_exception(the_exception)
                                     jotter.get_jotter().jot_exception(the_exception)
                                     pass
 
                                 # Brief delay
                                 utime.sleep_ms(10)
 
-                        print("Sending statuses to server.")
-                        jotter.get_jotter().jot("Sending statuses to server.", source_file=__name__)
+                        if json_to_send_statuses:
+                            print("Sending statuses to server.")
+                            jotter.get_jotter().jot("Sending statuses to server.", source_file=__name__)
+
                         while json_to_send_statuses:
                             status_json = json_to_send_statuses.popleft()
                             retry_count = 0
@@ -1089,14 +1128,18 @@ def run_mainloop():
                                     response = None
                                     gc.collect()
                                 except Exception as the_exception:
+                                    import sys
+                                    sys.print_exception(the_exception)
                                     jotter.get_jotter().jot_exception(the_exception)
                                     pass
 
                                 # Brief delay
                                 utime.sleep_ms(10)
 
-                        print("Sending network topologies to server.")
-                        jotter.get_jotter().jot("Sending network topologies to server.", source_file=__name__)
+                        if json_to_send_network_topologies:
+                            print("Sending network topologies to server.")
+                            jotter.get_jotter().jot("Sending network topologies to server.", source_file=__name__)
+
                         while json_to_send_network_topologies:
                             network_topology_json = json_to_send_network_topologies.popleft()
                             retry_count = 0
@@ -1117,6 +1160,8 @@ def run_mainloop():
                                     response = None
                                     gc.collect()
                                 except Exception as the_exception:
+                                    import sys
+                                    sys.print_exception(the_exception)
                                     jotter.get_jotter().jot_exception(the_exception)
                                     pass
 
@@ -1140,7 +1185,8 @@ def run_mainloop():
 
                 # If no messages in the queue and too long since last synch and not rtc callback
                 # and next frame time is more than a minute away
-                if not _rtc_callback_flag and \
+                if (not _rtc_callback_flag) and \
+                    (not _nm3_callback_flag) and \
                         ((wifi_connection_retry_count > 5) or
                          ((not json_to_send_messages) and (not json_to_send_statuses)
                           and (utime.time() > _nm3_callback_seconds + 30)
