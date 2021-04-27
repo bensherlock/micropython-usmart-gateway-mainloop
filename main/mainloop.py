@@ -353,16 +353,6 @@ def run_mainloop():
     max3221e = MAX3221E(pyb.Pin.board.Y5)
     max3221e.tx_force_on()  # Enable Tx Driver
 
-    # Feed the watchdog
-    wdt.feed()
-
-    utime.sleep_ms(10000)
-    powermodule.enable_nm3()
-    utime.sleep_ms(10000)  # Await end of bootloader
-
-    # Feed the watchdog
-    wdt.feed()
-
     # Set callback for nm3 pin change - line goes high on frame synchronisation
     # make sure it is clear first
     nm3_extint = pyb.ExtInt(pyb.Pin.board.Y3, pyb.ExtInt.IRQ_RISING, pyb.Pin.PULL_DOWN, None)
@@ -372,6 +362,16 @@ def run_mainloop():
     uart = machine.UART(1, 9600, bits=8, parity=None, stop=1, timeout=100)
     nm3_modem = Nm3(input_stream=uart, output_stream=uart)
     utime.sleep_ms(20)
+
+    # Feed the watchdog
+    wdt.feed()
+
+    utime.sleep_ms(10000)
+    powermodule.enable_nm3()
+    utime.sleep_ms(10000)  # Await end of bootloader
+
+    # Feed the watchdog
+    wdt.feed()
 
     # Grab address and voltage from the modem
     nm3_address = nm3_modem.get_address()
@@ -421,10 +421,13 @@ def run_mainloop():
     network_guard_interval_ms = 500
     network_cycle_counter = 0
     network_cycle_limit = 6  # 6 hourly
+    network_partials_counter = 0
+    network_partials_per_full_discovery = 6  # 6x6=36 hourly
     network_frame_interval_s = 3600  # 1 hour
     network_next_frame_time_s = utime.time()  # Non-zero value to start from
     network_is_configured = False
-    network_do_configuration = False
+    network_do_full_configuration = False
+    network_do_partial_configuration = False
     network_config_is_stale = True
 
     # Create the network protocol object
@@ -896,21 +899,36 @@ def run_mainloop():
                     jotter.get_jotter().jot("Time for network frame.", source_file=__name__)
 
                     if network_cycle_counter >= network_cycle_limit:
-                        network_do_configuration = True
+                        # Configuration required
+                        if network_partials_counter >= network_partials_per_full_discovery:
+                            network_do_partial_configuration = False
+                            network_do_full_configuration = True
+                        else:
+                            network_do_partial_configuration = True
 
-                    if network_do_configuration:
+                    if network_do_full_configuration or network_do_partial_configuration:
                         print("Configuring network.")
                         jotter.get_jotter().jot("Configuring network.", source_file=__name__)
-                        # Reinitialse the network protocol
-                        net_protocol.init(nm3_modem, network_node_addresses, wdt)
+
+                        if network_do_full_configuration:
+                            print("Configuring network with full discovery.")
+                            jotter.get_jotter().jot("Configuring network with full discovery.", source_file=__name__)
+                            # Reinitialise the network protocol
+                            net_protocol.init(nm3_modem, network_node_addresses, wdt)
+                            network_partials_counter = 0
+
                         # Then do discovery
                         network_is_configured = False
-                        if net_protocol.do_net_discovery():
+                        if net_protocol.do_net_discovery(full_rediscovery=network_do_full_configuration):
                             net_protocol.setup_net_schedule(network_guard_interval_ms)  # guard interval [msec] can be specified as function input (default: 500)
                             network_cycle_counter = 0
-                            network_do_configuration = False
+                            if network_do_partial_configuration:
+                                network_partials_counter = network_partials_counter + 1
+
+                            network_do_full_configuration = False
+                            network_do_partial_configuration = False
                             network_is_configured = True
-                            network_next_frame_time_s = utime.time() # Set the epoch to now
+                            network_next_frame_time_s = utime.time()  # Set the epoch to now
 
                     # Extract network topology and schedule information as JSON
                     net_info_json = net_protocol.get_net_info_json()
@@ -919,6 +937,8 @@ def run_mainloop():
                                        "nm3SensorStayAwake": network_nm3_sensor_stay_awake,
                                        "cycleLimit": network_cycle_limit,
                                        "cycleCounter": network_cycle_counter,
+                                       "partialsCounter": network_partials_counter,
+                                       "partialsPerFullDiscovery": network_partials_per_full_discovery,
                                        "guardIntervalMs": network_guard_interval_ms,
                                        "frameIntervalS": network_frame_interval_s,
                                        "nodeAddresses": network_node_addresses}
@@ -1054,16 +1074,17 @@ def run_mainloop():
                                 network_nm3_gateway_stay_awake = network_config_json["nm3GatewayStayAwake"]  # Bool
                                 network_nm3_sensor_stay_awake = network_config_json["nm3SensorStayAwake"]  # Bool
                                 network_cycle_limit = network_config_json["cycleLimit"]  # Integer
+                                network_partials_per_full_discovery = network_config_json["partialsPerFullDiscovery"]  # Integer
                                 network_guard_interval_ms = network_config_json["guardIntervalMs"]  # Integer
                                 network_frame_interval_s = network_config_json["frameIntervalS"]  # Integer
                                 node_addresses = network_config_json["nodeAddresses"]  # List of Integers
                                 # If change in node addresses then we trigger a network configuration
                                 if len(node_addresses) != len(network_node_addresses):
-                                    network_do_configuration = True
+                                    network_do_full_configuration = True
                                 else:
                                     for the_address in node_addresses:
                                         if the_address not in network_node_addresses:
-                                            network_do_configuration = True
+                                            network_do_full_configuration = True
                                             break
                                 network_node_addresses = node_addresses
 
