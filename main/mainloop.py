@@ -289,10 +289,22 @@ def send_usmart_alive_message(modem):
         modem.send_broadcast_message(alive_string.encode('utf-8'))
 
 
+_env_variables = None
+
+
+# - def set_environment_variables()
+def set_environment_variables(env_variables_dict=None):
+    """Set a global dictionary of variables."""
+    global _env_variables
+    _env_variables = env_variables_dict
+
+
 # Standard Interface for MainLoop
 # - def run_mainloop() : never returns
 def run_mainloop():
     """Standard Interface for MainLoop. Never returns."""
+
+    global _env_variables
     global _rtc_callback_flag
     global _rtc_callback_seconds
     global _nm3_callback_flag
@@ -390,6 +402,9 @@ def run_mainloop():
 
     # Delay for transmission of broadcast packet
     utime.sleep_ms(500)
+
+    # sensor payload
+    sensor = sensor_payload.get_sensor_payload_instance()
 
     operating_mode = 2  # Mark Three
 
@@ -810,7 +825,7 @@ def run_mainloop():
                     vbatt = powermodule.get_vbatt_reading()
 
                     # sensor payload
-                    sensor = sensor_payload.get_sensor_payload_instance()
+                    # sensor = sensor_payload.get_sensor_payload_instance()
                     sensor.start_acquisition()
                     sensor_acquisition_start = utime.time()
                     while (not sensor.is_completed()) and (utime.time() < sensor_acquisition_start + 5):
@@ -820,13 +835,13 @@ def run_mainloop():
                     sensor_data_json = sensor.get_latest_data_as_json()
                     # Needs changing: https://google.github.io/styleguide/jsoncstyleguide.xml?showone=Property_Name_Format#Property_Name_Format
                     # camelCase for propertyNames.
-                    status_json = {"Status": {"Timestamp": utime.time(),
-                                              "Uptime": (utime.time() - uptime_start),
-                                              "LastResetCause": last_reset_cause,
-                                              "VBatt": vbatt,
-                                              "Sensors": sensor_data_json},
-                                   "SeqNo": status_seq,
-                                   "Retry": 0}
+                    status_json = {"status": {"timestamp": utime.time(),
+                                              "uptime": (utime.time() - uptime_start),
+                                              "lastResetCause": last_reset_cause,
+                                              "vbatt": vbatt,
+                                              "sensors": sensor_data_json},
+                                   "seqNo": status_seq,
+                                   "retry": 0}
 
                     status_seq = status_seq + 1
                     if status_seq >= 65536:  # Aribtrary limit to 16-bit uint.
@@ -870,10 +885,10 @@ def run_mainloop():
                         message_packet_json = message_packet.json()
                         # Needs changing: https://google.github.io/styleguide/jsoncstyleguide.xml?showone=Property_Name_Format#Property_Name_Format
                         # camelCase for propertyNames.
-                        message_json = {"Message": message_packet_json,
+                        message_json = {"message": message_packet_json,
                                         "timestamp": utime.time(),
-                                        "SeqNo": message_seq,
-                                        "Retry": 0}
+                                        "seqNo": message_seq,
+                                        "retry": 0}
                         message_seq = message_seq + 1
                         if message_seq >= 65536:  # Aribtrary limit to 16-bit uint.
                             message_seq = 0
@@ -882,16 +897,92 @@ def run_mainloop():
                         json_to_send_messages.append(message_json)
 
                         # Process special packets
-                        if message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USMRT':
+                        # Only unicast command will work for gateway.
+                        if message_packet.packet_type == MessagePacket.PACKETTYPE_UNICAST and \
+                                message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USMRT':
                             # print("Reset message received.")
                             jotter.get_jotter().jot("Reset message received.", source_file=__name__)
                             # Reset the device
                             machine.reset()
 
-                        if message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USPNG':
+                        # Only unicast command will work for gateway.
+                        if message_packet.packet_type == MessagePacket.PACKETTYPE_UNICAST and \
+                                message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USOTA':
+                            # print("OTA message received.")
+                            jotter.get_jotter().jot("OTA message received.", source_file=__name__)
+                            # Write a special flag file to tell us to OTA on reset
+                            try:
+                                with open('.USOTA', 'w') as otaflagfile:
+                                    # otaflagfile.write(latest_version)
+                                    otaflagfile.close()
+                            except Exception as the_exception:
+                                jotter.get_jotter().jot_exception(the_exception)
+
+                                import sys
+                                sys.print_exception(the_exception)
+                                pass
+
+                            # Reset the device
+                            machine.reset()
+
+                        # Only unicast command will work for gateway.
+                        if message_packet.packet_type == MessagePacket.PACKETTYPE_UNICAST and \
+                                message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USPNG':
                             # print("PNG message received.")
                             jotter.get_jotter().jot("PNG message received.", source_file=__name__)
                             send_usmart_alive_message(nm3_modem)
+
+                        # Only unicast command will work for gateway.
+                        if message_packet.packet_type == MessagePacket.PACKETTYPE_UNICAST and \
+                                message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USMOD':
+                            # print("MOD message received.")
+                            jotter.get_jotter().jot("MOD message received.", source_file=__name__)
+                            # Send the installed modules list as single packets with 1 second delay between each -
+                            # Only want to be calling this after doing an OTA command and ideally not in the sea.
+
+                            nm3_address = nm3_modem.get_address()
+
+                            if _env_variables and "installedModules" in _env_variables:
+                                installed_modules = _env_variables["installedModules"]
+                                if installed_modules:
+                                    for (mod, version) in installed_modules.items():
+                                        mod_string = "UM" + "{:03d}".format(nm3_address) + ":" + str(mod) + ":" \
+                                                     + str(version if version else "None")
+                                        nm3_modem.send_broadcast_message(mod_string.encode('utf-8'))
+
+                                        # delay whilst sending
+                                        utime.sleep_ms(1000)
+
+                                        # Feed the watchdog
+                                        wdt.feed()
+
+                        # Only unicast command will work for gateway.
+                        if message_packet.packet_type == MessagePacket.PACKETTYPE_UNICAST and \
+                                message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USCALDO':
+                            # print("CAL message received.")
+                            jotter.get_jotter().jot("CAL message received.", source_file=__name__)
+
+                            nm3_address = nm3_modem.get_address()
+
+                            # Reply with an acknowledgement then start the calibration
+                            msg_string = "USCALMSG" + "{:03d}".format(nm3_address) + ":Starting Calibration"
+                            nm3_modem.send_broadcast_message(msg_string.encode('utf-8'))
+                            # delay whilst sending
+                            utime.sleep_ms(1000)
+                            # Feed the watchdog
+                            wdt.feed()
+                            # start calibration
+                            (x_min, x_max, y_min, y_max, z_min, z_max) = sensor.do_calibration(duration=20)
+                            # Feed the watchdog
+                            wdt.feed()
+                            # magneto values are int16
+                            caldata_string = "USCALDATA" + "{:03d}".format(nm3_address) + ":" \
+                                             + "{:06d},{:06d},{:06d},{:06d},{:06d},{:06d}".format(x_min, x_max,
+                                                                                                  y_min, y_max,
+                                                                                                  z_min, z_max)
+                            nm3_modem.send_broadcast_message(caldata_string.encode('utf-8'))
+                            # delay whilst sending
+                            utime.sleep_ms(1000)
 
                 # If time to do the network data gather/configuration Only do network if we have any nodes to talk to
                 if network_node_addresses and network_next_frame_time_s <= utime.time():
@@ -946,8 +1037,8 @@ def run_mainloop():
                     network_topology_json = {"topology": net_info_json,
                                              "config": net_config_json,
                                              "timestamp": utime.time(),
-                                             "SeqNo": network_topology_seq,
-                                             "Retry": 0}
+                                             "seqNo": network_topology_seq,
+                                             "retry": 0}
 
                     network_topology_seq = network_topology_seq + 1
                     if network_topology_seq >= 65536:  # Aribtrary limit to 16-bit uint.
@@ -975,10 +1066,10 @@ def run_mainloop():
                             message_packet_json = message_packet.json()
                             # Needs changing: https://google.github.io/styleguide/jsoncstyleguide.xml?showone=Property_Name_Format#Property_Name_Format
                             # camelCase for propertyNames.
-                            message_json = {"Message": message_packet_json,
+                            message_json = {"message": message_packet_json,
                                             "timestamp": utime.time(),
-                                            "SeqNo": message_seq,
-                                            "Retry": 0}
+                                            "seqNo": message_seq,
+                                            "retry": 0}
                             message_seq = message_seq + 1
                             if message_seq >= 65536:  # Aribtrary limit to 16-bit uint.
                                 message_seq = 0
@@ -1245,9 +1336,9 @@ def run_mainloop():
                         # Feed the watchdog
                         wdt.feed()
                         # Now wait
-                        utime.sleep_ms(100)
+                        # utime.sleep_ms(100)
                         # pyb.wfi()  # wait-for-interrupt (can be ours or the system tick every 1ms or anything else)
-                        # machine.lightsleep()  # lightsleep - don't use the time as this then overrides the RTC
+                        machine.lightsleep()  # lightsleep - don't use the time as this then overrides the RTC
 
                     # Wake-up
                     # pyb.LED(2).on()  # Awake
