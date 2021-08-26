@@ -1194,7 +1194,7 @@ def run_mainloop():
                             success_flag = False
 
                             while not success_flag and retry_count < 4:
-                                message_json["Retry"] = retry_count
+                                message_json["retry"] = retry_count
                                 retry_count = retry_count + 1
 
                                 try:
@@ -1226,7 +1226,7 @@ def run_mainloop():
                             success_flag = False
 
                             while not success_flag and retry_count < 4:
-                                status_json["Retry"] = retry_count
+                                status_json["retry"] = retry_count
                                 retry_count = retry_count + 1
 
                                 try:
@@ -1258,7 +1258,7 @@ def run_mainloop():
                             success_flag = False
 
                             while not success_flag and retry_count < 4:
-                                network_topology_json["Retry"] = retry_count
+                                network_topology_json["retry"] = retry_count
                                 retry_count = retry_count + 1
 
                                 try:
