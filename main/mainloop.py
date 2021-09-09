@@ -348,7 +348,7 @@ def run_mainloop():
     rtc = pyb.RTC()
     rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
     # A default wakeup to start with. To be overridden by network manager/sleep manager
-    rtc.wakeup(10 * 1000, rtc_callback)  # milliseconds - # Every 10 seconds
+    rtc.wakeup(2 * 1000, rtc_callback)  # milliseconds - # Every 2 seconds
 
     rtc_set_alarm_period_s(60 * 60)  # Every 60 minutes to do the status
     _rtc_callback_flag = True  # Set the flag so we do a status message on startup.
@@ -454,7 +454,7 @@ def run_mainloop():
 
 
     # Turn off the USB
-    # pyb.usb_mode(None)
+    pyb.usb_mode(None)
 
     while True:
         try:
@@ -1328,7 +1328,7 @@ def run_mainloop():
                         pyb.Pin('PULL_SDA', pyb.Pin.IN)  # disable 5.6kOhm X10/SDA pull-up
                         # Disable power supply to 232 driver, sensors, and SDCard
                         max3221e.tx_force_off()  # Disable Tx Driver
-                        # pyb.Pin.board.EN_3V3.off() # except in dev
+                        pyb.Pin.board.EN_3V3.off() # except in dev
                         pyb.LED(2).off()  # Asleep
                         utime.sleep_ms(10)
 
