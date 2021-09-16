@@ -439,6 +439,7 @@ def run_mainloop():
     network_partials_counter = 0
     network_partials_per_full_discovery = 6  # 6x6=36 hourly
     network_frame_interval_s = 3600  # 1 hour
+    network_link_quality_threshold = 4 # 1-5
     network_next_frame_time_s = utime.time()  # Non-zero value to start from
     network_is_configured = False
     network_do_full_configuration = False
@@ -1010,6 +1011,7 @@ def run_mainloop():
 
                         # Then do discovery
                         network_is_configured = False
+                        net_protocol.set_link_quality_threshold(network_link_quality_threshold)  # set the link quality threshold
                         if net_protocol.do_net_discovery(full_rediscovery=network_do_full_configuration):
                             net_protocol.setup_net_schedule(network_guard_interval_ms)  # guard interval [msec] can be specified as function input (default: 500)
                             network_cycle_counter = 0
@@ -1032,6 +1034,7 @@ def run_mainloop():
                                        "partialsPerFullDiscovery": network_partials_per_full_discovery,
                                        "guardIntervalMs": network_guard_interval_ms,
                                        "frameIntervalS": network_frame_interval_s,
+                                       "linkQualityThreshold": network_link_quality_threshold,
                                        "nodeAddresses": network_node_addresses}
 
                     network_topology_json = {"topology": net_info_json,
@@ -1168,6 +1171,7 @@ def run_mainloop():
                                 network_partials_per_full_discovery = network_config_json["partialsPerFullDiscovery"]  # Integer
                                 network_guard_interval_ms = network_config_json["guardIntervalMs"]  # Integer
                                 network_frame_interval_s = network_config_json["frameIntervalS"]  # Integer
+                                network_link_quality_threshold = network_config_json["linkQualityThreshold"] # Integer
                                 node_addresses = network_config_json["nodeAddresses"]  # List of Integers
                                 # If change in node addresses then we trigger a network configuration
                                 if len(node_addresses) != len(network_node_addresses):
