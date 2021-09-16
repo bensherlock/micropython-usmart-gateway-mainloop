@@ -1037,17 +1037,8 @@ def run_mainloop():
                                        "linkQualityThreshold": network_link_quality_threshold,
                                        "nodeAddresses": network_node_addresses}
 
-                    network_topology_json = {"topology": net_info_json,
-                                             "config": net_config_json,
-                                             "timestamp": utime.time(),
-                                             "seqNo": network_topology_seq,
-                                             "retry": 0}
-
-                    network_topology_seq = network_topology_seq + 1
-                    if network_topology_seq >= 65536:  # Aribtrary limit to 16-bit uint.
-                        network_topology_seq = 0
-
-                    json_to_send_network_topologies.append(network_topology_json)
+                    # variable to hold the data gathering info
+                    data_gathering_info_json = None
 
                     if network_is_configured:
                         print("Gathering data from network.")
@@ -1063,6 +1054,8 @@ def run_mainloop():
 
                         packets = net_protocol.gather_sensor_data(time_till_next_frame, network_nm3_sensor_stay_awake)
                         network_cycle_counter = network_cycle_counter + 1
+
+                        data_gathering_info_json = net_protocol.get_data_gathering_info_json()
 
                         for message_packet in packets:
                             # Send packet onwards
@@ -1081,6 +1074,20 @@ def run_mainloop():
                             json_to_send_messages.append(message_json)
 
                     pass
+
+                    network_topology_json = {"topology": net_info_json,
+                                             "config": net_config_json,
+                                             "data_gathering": data_gathering_info_json,
+                                             "timestamp": utime.time(),
+                                             "seqNo": network_topology_seq,
+                                             "retry": 0}
+
+                    network_topology_seq = network_topology_seq + 1
+                    if network_topology_seq >= 65536:  # Aribtrary limit to 16-bit uint.
+                        network_topology_seq = 0
+
+                    json_to_send_network_topologies.append(network_topology_json)
+
 
                 # If messages or statuses are in the queue or we need to refresh the network config
                 if json_to_send_messages or json_to_send_statuses or network_config_is_stale:
