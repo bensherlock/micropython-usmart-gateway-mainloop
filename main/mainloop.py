@@ -1313,7 +1313,8 @@ def run_mainloop():
                         ((wifi_connection_retry_count > 5) or
                          ((not json_to_send_messages) and (not json_to_send_statuses)
                           and (utime.time() > _nm3_callback_seconds + 30)
-                          and (utime.time() + 60 < network_next_frame_time_s))):
+                          and (not network_node_addresses or (utime.time() + 60 < network_next_frame_time_s)))):
+                    # network frame time is only updated if we have node addresses
                     # Disable the wifi
                     wifi_disconnecting_start_time = utime.time()
                     disconnect_from_wifi()  # Need to give the OS time to do this and power down the wifi chip.
