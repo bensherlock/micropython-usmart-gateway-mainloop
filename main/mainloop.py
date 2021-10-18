@@ -415,8 +415,8 @@ def run_mainloop():
 
     # Micropython needs a defined size of deque
     json_to_send_messages = deque((), 50)  # Incoming NM3 Messages
-    json_to_send_statuses = deque((), 10)  # Sensors and VBatt and Uptime
-    json_to_send_network_topologies = deque((), 10)  # Network topology from uac_network
+    json_to_send_statuses = deque((), 20)  # Sensors and VBatt and Uptime
+    json_to_send_network_topologies = deque((), 40)  # Network topology from uac_network
 
     # Sequence Numbers to identify duplicate http sends.
     status_seq = 0
@@ -1090,7 +1090,7 @@ def run_mainloop():
 
 
                 # If messages or statuses are in the queue or we need to refresh the network config
-                if json_to_send_messages or json_to_send_statuses or network_config_is_stale:
+                if json_to_send_messages or json_to_send_statuses or json_to_send_network_topologies or network_config_is_stale:
 
                     wifi_connected = is_wifi_connected()
 
